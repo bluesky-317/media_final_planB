@@ -79,30 +79,114 @@ SHIELD_THICK = 10
 SHIELD_ARC_DEG = 60  # 弧寬 (度)
 SHIELD_BLOCK_DIST = 64  # 子彈距離心 ≤ 此值且角度命中 → 被擋
 
+# 戰鬥節奏
+TURN_HOVER_SECONDS = 1.0   # 戰鬥內按鈕懸停確認時間 (比主選單快)
+
 # 關卡資訊
+# id        = 顯示用編號 (按鈕上 1/2/3)
+# pattern_id = 對應 bullets.make_pattern 的彈幕模式 (1=Froggit, 2=Napstablook, 3=Sans)
+# 第 1、2 關內容已對調
 LEVELS = [
     {
         "id": 1,
-        "name": "Level 1 - Froggit",
-        "subtitle": "簡單彈幕 / 蒼蠅",
-        "color": GREEN,
-        "duration": 30,
+        "pattern_id": 2,
+        "name": "Level 1 - Napstablook",
+        "subtitle": "波形眼淚 / 中等難度",
+        "color": BLUE,
         "hp": 100,
+        # 戰鬥資料
+        "enemy_name": "NAPSTABLOOK",
+        "enemy_hp": 25,
+        "turn_duration": 7,
+        "mercy_threshold": 2,
+        "intro": [
+            "前方擋著一隻看起來很憂鬱的幽靈。",
+            "牠似乎不太想理你。",
+        ],
+        "acts": [
+            {"label": "Check",
+             "lines": ["NAPSTABLOOK  ATK 10  DEF 10",
+                       "鄰居家的幽靈,習慣自我隱形。"],
+             "mercy": 0},
+            {"label": "Cheer",
+             "lines": ["你輕聲鼓勵了 Napstablook。",
+                       "牠似乎稍微振作了一點。"],
+             "mercy": 1},
+            {"label": "Flirt",
+             "lines": ["你向 Napstablook 表達了好感。",
+                       "牠害羞地飄到天花板上。"],
+             "mercy": 1},
+        ],
+        "fight_lines": ["你揮拳。", "命中。"],
+        "kill_lines":  ["Napstablook 默默地消失了。"],
+        "spare_lines": ["你選擇饒恕 Napstablook。",
+                        "牠帶著一絲笑意離開了。"],
+        "spare_not_ready_lines": ["對方還沒打算離開。"],
     },
     {
         "id": 2,
-        "name": "Level 2 - Napstablook",
-        "subtitle": "波形眼淚 / 中等難度",
-        "color": BLUE,
-        "duration": 40,
+        "pattern_id": 1,
+        "name": "Level 2 - Froggit",
+        "subtitle": "簡單彈幕 / 蒼蠅",
+        "color": GREEN,
         "hp": 100,
+        "enemy_name": "FROGGIT",
+        "enemy_hp": 30,
+        "turn_duration": 6,
+        "mercy_threshold": 2,
+        "intro": [
+            "一隻 Froggit 從草叢裡跳了出來。",
+            "牠歪著頭看著你。",
+        ],
+        "acts": [
+            {"label": "Check",
+             "lines": ["FROGGIT  ATK 4  DEF 5",
+                       "剛離開家的小青蛙。"],
+             "mercy": 0},
+            {"label": "Compliment",
+             "lines": ["你稱讚了 Froggit 的眼睛。",
+                       "Froggit 開心地拍了拍腳。"],
+             "mercy": 1},
+            {"label": "Threat",
+             "lines": ["你瞪了 Froggit 一眼。",
+                       "Froggit 嚇得後退一步。"],
+             "mercy": 1},
+        ],
+        "fight_lines": ["你揮拳。", "命中。"],
+        "kill_lines":  ["你擊倒了 Froggit。"],
+        "spare_lines": ["你選擇饒恕 Froggit。",
+                        "牠跳走了。"],
+        "spare_not_ready_lines": ["Froggit 看起來不打算放過你。"],
     },
     {
         "id": 3,
+        "pattern_id": 3,
         "name": "Level 3 - Sans",
         "subtitle": "骨頭 + 雷射 / 困難",
         "color": RED,
-        "duration": 50,
         "hp": 100,
+        "enemy_name": "SANS",
+        "enemy_hp": 40,
+        "turn_duration": 10,
+        "mercy_threshold": 99,   # 無法用 ACT 饒恕,只能 FIGHT
+        "intro": [
+            "Sans 把手插在口袋裡。",
+            "「想聽個笑話嗎?」",
+            "...你感覺這場仗不會輕鬆結束。",
+        ],
+        "acts": [
+            {"label": "Check",
+             "lines": ["SANS  ATK 1  DEF 1",
+                       "比看起來危險的怪物。"],
+             "mercy": 0},
+            {"label": "Talk",
+             "lines": ["你嘗試和 Sans 聊天。",
+                       "他只是聳了聳肩。"],
+             "mercy": 0},
+        ],
+        "fight_lines": ["你揮拳!", "...Sans 閃開了。"],
+        "kill_lines":  ["......", "Sans 緩緩地閉上了眼。"],
+        "spare_lines": ["......", "「...好吧,這次放你過。」"],
+        "spare_not_ready_lines": ["Sans 不打算這麼簡單放你走。"],
     },
 ]

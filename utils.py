@@ -14,32 +14,36 @@ def draw_text_center(surf, font, text, cx, cy, color):
     surf.blit(s, r)
 
 
-def draw_heart(surf, cx, cy, size=18, color=config.HEART_RED, glow=True):
-    """畫 Undertale 風的紅心。"""
-    # 用兩個圓 + 一個三角形組成
-    r = max(2, size // 2)
-    left = (int(cx - r // 1.1), int(cy - r // 2.5))
-    right = (int(cx + r // 1.1), int(cy - r // 2.5))
-    bottom = (int(cx), int(cy + size // 1.3))
+# 8x8 像素風心臟 (Undertale 風)
+_HEART_BITMAP = (
+    "01100110",
+    "11111111",
+    "11111111",
+    "11111111",
+    "01111110",
+    "00111100",
+    "00011000",
+    "00000000",
+)
 
-    if glow:
-        glow_surf = pygame.Surface((size * 3, size * 3), pygame.SRCALPHA)
-        pygame.draw.circle(glow_surf, (*color, 60),
-                           (size * 3 // 2, size * 3 // 2), int(size * 1.4))
-        surf.blit(glow_surf, (cx - size * 3 // 2, cy - size * 3 // 2))
 
-    pygame.draw.circle(surf, color, left, r)
-    pygame.draw.circle(surf, color, right, r)
-    pygame.draw.polygon(surf, color, [
-        (left[0] - r, left[1]),
-        (right[0] + r, right[1]),
-        bottom,
-    ])
+def draw_heart(surf, cx, cy, size=18, color=config.HEART_RED, glow=False):
+    """像素風心臟。size 約等於最終 sprite 邊長。glow 參數保留向後相容但忽略。"""
+    scale = max(2, round(size / 6))
+    w = 8 * scale
+    h = 8 * scale
+    ox = int(cx - w / 2)
+    oy = int(cy - h / 2)
+    for y, row in enumerate(_HEART_BITMAP):
+        for x, ch in enumerate(row):
+            if ch == "1":
+                pygame.draw.rect(surf, color,
+                                 (ox + x * scale, oy + y * scale, scale, scale))
 
 
 def heart_rect(cx, cy, size=config.HEART_SIZE):
-    """碰撞用矩形 (略小於繪製尺寸以利玩家)。"""
-    s = int(size * 0.9)
+    """碰撞用矩形 (略大於繪製尺寸以利擊中判定)。"""
+    s = int(size * 1.2)
     return pygame.Rect(int(cx - s // 2), int(cy - s // 2), s, s)
 
 
@@ -143,6 +147,84 @@ def shield_blocks(bx, by, hx, hy, angle,
     arc = math.radians(arc_deg)
     diff = abs(((a - angle + math.pi) % (2 * math.pi)) - math.pi)
     return diff < arc / 2
+
+
+class DialogBox:
+    """打字機式對話框 (Undertale 風)。
+
+    使用方式：建立時傳入 lines (list[str])、字體、矩形範圍。
+    每幀呼叫 update(dt) + draw(surf)。所有行都顯示完 → self.done = True。
+    每行顯示完成後等 post_line_delay 秒會自動進到下一行。
+    """
+
+    def __init__(self, lines, font, rect, chars_per_sec=30,
+                 color=config.WHITE, blip_sfx=None,
+                 post_line_delay=0.7, prefix="* "):
+        self.lines = list(lines)
+        self.font = font
+        self.rect = pygame.Rect(rect)
+        self.chars_per_sec = chars_per_sec
+        self.color = color
+        self.blip_sfx = blip_sfx        # callable() 或 None
+        self.post_line_delay = post_line_delay
+        self.prefix = prefix
+        self.cur_line = 0
+        self.cur_chars = 0.0
+        self.post_delay_t = 0.0
+        self._last_blip = -3
+
+    @property
+    def done(self):
+        return self.cur_line >= len(self.lines)
+
+    @property
+    def line_full(self):
+        if self.done:
+            return True
+        return int(self.cur_chars) >= len(self.lines[self.cur_line])
+
+    def update(self, dt):
+        if self.done:
+            return
+        if not self.line_full:
+            prev = int(self.cur_chars)
+            self.cur_chars += dt * self.chars_per_sec
+            new = int(self.cur_chars)
+            if (new > prev and self.blip_sfx is not None
+                    and new - self._last_blip >= 3):
+                self.blip_sfx()
+                self._last_blip = new
+        else:
+            self.post_delay_t += dt
+            if self.post_delay_t >= self.post_line_delay:
+                self.cur_line += 1
+                self.cur_chars = 0.0
+                self.post_delay_t = 0.0
+                self._last_blip = -3
+
+    def draw(self, surf, bg=config.BLACK, border_color=config.WHITE,
+             border_w=3, padding=20):
+        pygame.draw.rect(surf, bg, self.rect)
+        pygame.draw.rect(surf, border_color, self.rect, border_w)
+        if self.done:
+            return
+        line = self.lines[self.cur_line]
+        visible = line[:int(self.cur_chars)]
+        sub_lines = visible.split("\n")
+        if self.prefix:
+            sub_lines[0] = self.prefix + sub_lines[0]
+        line_h = self.font.get_linesize()
+        for i, sub in enumerate(sub_lines):
+            ts = self.font.render(sub, True, self.color)
+            surf.blit(ts, (self.rect.left + padding,
+                           self.rect.top + padding + i * line_h))
+        # 行讀完時右下角小三角
+        if self.line_full:
+            tx = self.rect.right - padding - 14
+            ty = self.rect.bottom - padding - 12
+            pygame.draw.polygon(surf, self.color, [
+                (tx, ty), (tx + 14, ty), (tx + 7, ty + 10),
+            ])
 
 
 def draw_mode_indicator(surf, font, current_mode, x, y):

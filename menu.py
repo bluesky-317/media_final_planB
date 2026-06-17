@@ -29,7 +29,8 @@ class LevelMenu:
                                y, self.BTN_W, self.BTN_H)
             self.buttons.append({"rect": rect, "level": lv, "hover": 0.0})
 
-        self.cursor = (config.SCREEN_WIDTH // 2, config.SCREEN_HEIGHT // 2)
+        # 初始游標放在標題下方、按鈕上方，避免一進選單就壓到關卡按鈕
+        self.cursor = (config.SCREEN_WIDTH // 2, 90)
         self.selected_level = None
 
     def update(self, dt, finger_norm, tracker):
@@ -53,6 +54,7 @@ class LevelMenu:
 
     def reset(self):
         self.selected_level = None
+        self.cursor = (config.SCREEN_WIDTH // 2, 90)
         for b in self.buttons:
             b["hover"] = 0.0
 

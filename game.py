@@ -1,9 +1,15 @@
-"""Undertale 風戰鬥場景 (含手勢切換靈魂顏色)。
+"""Undertale 風戰鬥場景 (回合制 + 手勢切換靈魂顏色)。
 
-模式：
-  RED   食指                    自由 2D 移動 (預設)
-  BLUE  食指+中指 (✌)           重力 + 跳躍；X 軸跟食指，Y 軸物理
-  GREEN 整隻手張開 (🖐)          固定於中央，盾隨食指方向旋轉
+階段：
+  DIALOG  → 對話 (打字機)
+  PLAYER  → 玩家回合,選 FIGHT / ACT / ITEM / MERCY
+  ACT_MENU→ ACT 子選單
+  ENEMY   → 敵人回合,閃彈幕 (沿用 RED/BLUE/GREEN 手勢)
+
+靈魂模式 (僅 ENEMY 階段):
+  RED   食指                自由 2D 移動 (預設)
+  BLUE  食指+中指 (✌)        重力 + 跳躍
+  GREEN 整隻手張開 (🖐)        固定中央 + 盾
 """
 import math
 import random
@@ -14,11 +20,30 @@ import config
 import bullets as bullets_mod
 from utils import (clamp, draw_heart, heart_rect, draw_text_center,
                    draw_camera_preview, draw_shield_bar, shield_blocks,
-                   draw_mode_indicator, draw_no_camera_banner)
+                   draw_mode_indicator, draw_no_camera_banner, DialogBox)
+
+try:
+    import audio
+    _AUDIO = True
+except Exception:
+    _AUDIO = False
+
+
+def _sfx(name):
+    if _AUDIO:
+        try:
+            audio.play_sfx(name)
+        except Exception:
+            pass
 
 
 class BattleScene:
-    """單一關卡的戰鬥流程。"""
+    """回合制戰鬥。"""
+
+    PHASE_DIALOG = "DIALOG"
+    PHASE_PLAYER = "PLAYER"
+    PHASE_ACT_MENU = "ACT_MENU"
+    PHASE_ENEMY = "ENEMY"
 
     def __init__(self, level, font_big, font_mid, font_small):
         self.level = level
@@ -26,34 +51,99 @@ class BattleScene:
         self.font_mid = font_mid
         self.font_small = font_small
 
+        # 玩家
         self.hp = level["hp"]
-        self.duration = level["duration"]
-        self.elapsed = 0.0
-        self.pattern = bullets_mod.make_pattern(level["id"])
-        self.bullets = []
+        self.hp_max = level["hp"]
+        self.items = 2
+        self.heal_amount = 30
 
-        # 心一開始放在戰鬥框中央 (紅心預設)
+        # 敵人
+        self.enemy_name = level["enemy_name"]
+        self.enemy_hp = level["enemy_hp"]
+        self.enemy_hp_max = level["enemy_hp"]
+        self.mercy = 0
+        self.mercy_threshold = level["mercy_threshold"]
+
+        # 階段 + 對話
+        self.phase = self.PHASE_DIALOG
+        self.dialog = None
+        self.dialog_next_phase = self.PHASE_PLAYER
+        self.dialog_done_action = None
+        self._start_dialog(level["intro"], next_phase=self.PHASE_PLAYER)
+
+        # 行動按鈕 (PLAYER 階段)
+        self._build_action_buttons()
+        self.act_buttons = []
+
+        # 戰鬥彈幕 (每回合重建,避免 spawn_t 累積)
+        self.pattern_id = level["pattern_id"]
+        self.pattern = None
+        self.bullets = []
+        self.turn_duration = level["turn_duration"]
+        self.turn_elapsed = 0.0
+
+        # 心與游標
         self.heart_x = float(config.BOX_CENTER_X)
         self.heart_y = float(config.BOX_CENTER_Y)
+        self.cursor = (config.BOX_CENTER_X, config.BOX_CENTER_Y)
 
-        # 靈魂模式
+        # 視覺反饋
+        self.damage_numbers = []     # {x, y, vy, val, t, color}
+        self.red_flash_t = 0.0
+        self.shake_t = 0.0
+        self.mode_flash_t = 0.0
+        self.blocked_flash_t = 0.0
+
+        # 既有 soul 模式 (僅 ENEMY 使用)
         self.soul_mode = config.SOUL_RED
-        self.mode_flash_t = 0.0  # 切換瞬間的閃光時間
-
-        # 藍心物理
         self.vel_y = 0.0
         self.on_ground = False
         self.jump_cooldown = 0.0
-
-        # 綠心盾
-        self.shield_angle = 0.0  # 由 tracker.angle 更新
-
+        self.shield_angle = 0.0
         self.invuln = 0
-        self.shake_t = 0.0
-        self.blocked_flash_t = 0.0  # 擋彈時的綠光提示
-        self.result = None  # None / 'win' / 'lose'
+
+        self.result = None
+
+        # BGM
+        if _AUDIO:
+            try:
+                audio.play_bgm(f"level{level['id']}", volume=0.4)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
+    def _build_action_buttons(self):
+        labels_colors = [
+            ("FIGHT",  (220, 60, 60)),
+            ("ACT",    (220, 180, 60)),
+            ("ITEM",   (80, 170, 230)),
+            ("MERCY",  (60, 220, 120)),
+        ]
+        n = len(labels_colors)
+        gap = 16
+        bw = (config.BOX_WIDTH - (n - 1) * gap) // n
+        bh = 48
+        by = config.BOX_BOTTOM + 22
+        self.action_buttons = []
+        for i, (label, color) in enumerate(labels_colors):
+            r = pygame.Rect(config.BOX_LEFT + i * (bw + gap), by, bw, bh)
+            self.action_buttons.append({
+                "rect": r, "label": label, "hover": 0.0, "color": color,
+            })
+
+    def _start_dialog(self, lines, next_phase=None, after=None):
+        rect = (config.BOX_LEFT, config.BOX_TOP,
+                config.BOX_WIDTH, config.BOX_HEIGHT)
+        self.dialog = DialogBox(
+            lines, self.font_small, rect,
+            chars_per_sec=30,
+            blip_sfx=(lambda: _sfx("blip")),
+            post_line_delay=0.7,
+        )
+        self.dialog_next_phase = next_phase
+        self.dialog_done_action = after
+        self.phase = self.PHASE_DIALOG
+
     @staticmethod
     def _floor_y():
         return config.BOX_BOTTOM - config.HEART_SIZE / 2 - 2
@@ -77,11 +167,167 @@ class BattleScene:
         if self.result is not None:
             return self.result
 
-        # 1) 模式切換 (HandTracker 已 debounce)
+        # 通用視覺計時
+        if self.shake_t > 0: self.shake_t -= dt
+        if self.mode_flash_t > 0: self.mode_flash_t -= dt
+        if self.blocked_flash_t > 0: self.blocked_flash_t -= dt
+        if self.red_flash_t > 0: self.red_flash_t -= dt
+        for d in self.damage_numbers:
+            d["t"] += dt
+            d["y"] += d["vy"] * dt
+        self.damage_numbers = [d for d in self.damage_numbers if d["t"] < 0.8]
+
+        # 游標 (全螢幕)
+        screen_rect = (0, 0, config.SCREEN_WIDTH, config.SCREEN_HEIGHT)
+        mapped = tracker.map_to_rect(finger_norm, screen_rect)
+        if mapped is not None:
+            self.cursor = (int(mapped[0]), int(mapped[1]))
+
+        if self.phase == self.PHASE_DIALOG:
+            self.dialog.update(dt)
+            if self.dialog.done:
+                action = self.dialog_done_action
+                next_phase = self.dialog_next_phase
+                self.dialog_done_action = None
+                self.dialog_next_phase = None
+                if action is not None:
+                    action()
+                elif next_phase is not None:
+                    self.phase = next_phase
+        elif self.phase == self.PHASE_PLAYER:
+            self._update_button_hover(dt, self.action_buttons, self._on_action)
+        elif self.phase == self.PHASE_ACT_MENU:
+            self._update_button_hover(dt, self.act_buttons, self._on_act)
+        elif self.phase == self.PHASE_ENEMY:
+            self._update_enemy_turn(dt, finger_norm, tracker)
+
+        return self.result
+
+    def _update_button_hover(self, dt, buttons, on_pick):
+        chosen = None
+        for b in buttons:
+            if b["rect"].collidepoint(self.cursor):
+                b["hover"] = min(config.TURN_HOVER_SECONDS, b["hover"] + dt)
+                if b["hover"] >= config.TURN_HOVER_SECONDS:
+                    chosen = b["label"]
+            else:
+                b["hover"] = max(0.0, b["hover"] - dt * 1.5)
+        if chosen is not None:
+            for b in buttons: b["hover"] = 0.0
+            on_pick(chosen)
+
+    # ------------------------------------------------------------------
+    def _on_action(self, label):
+        if label == "FIGHT":
+            self._do_fight()
+        elif label == "ACT":
+            self._open_act_menu()
+        elif label == "ITEM":
+            self._do_item()
+        elif label == "MERCY":
+            self._do_mercy()
+
+    def _do_fight(self):
+        _sfx("select")
+        dmg = random.randint(7, 13)
+        self.enemy_hp = max(0, self.enemy_hp - dmg)
+        self.damage_numbers.append({
+            "x": config.SCREEN_WIDTH // 2 + random.randint(-30, 30),
+            "y": 140, "vy": -55, "t": 0,
+            "val": dmg, "color": config.YELLOW,
+        })
+        _sfx("hit")
+        if self.enemy_hp <= 0:
+            self._start_dialog(self.level["kill_lines"], after=self._end_victory)
+        else:
+            self._start_dialog(self.level["fight_lines"], after=self._begin_enemy_turn)
+
+    def _do_item(self):
+        _sfx("select")
+        if self.items <= 0:
+            self._start_dialog(["道具袋裡什麼都沒了。"], after=self._begin_enemy_turn)
+            return
+        self.items -= 1
+        heal = min(self.heal_amount, self.hp_max - self.hp)
+        self.hp += heal
+        _sfx("heal")
+        self.damage_numbers.append({
+            "x": self.cursor[0], "y": config.BOX_BOTTOM + 100, "vy": -50, "t": 0,
+            "val": heal, "color": config.GREEN,
+        })
+        self._start_dialog(
+            [f"你吃了一塊怪物糖。", f"回復了 {heal} 點 HP。"],
+            after=self._begin_enemy_turn,
+        )
+
+    def _do_mercy(self):
+        if self.mercy >= self.mercy_threshold:
+            _sfx("spare")
+            self._start_dialog(self.level["spare_lines"], after=self._end_victory)
+        else:
+            _sfx("select")
+            self._start_dialog(self.level["spare_not_ready_lines"],
+                               after=self._begin_enemy_turn)
+
+    def _open_act_menu(self):
+        _sfx("menu")
+        acts = self.level["acts"]
+        labels = [a["label"] for a in acts] + ["BACK"]
+        n = len(labels)
+        gap = 12
+        bw = (config.BOX_WIDTH - (n - 1) * gap) // n
+        bh = 48
+        by = config.BOX_BOTTOM + 22
+        self.act_buttons = []
+        for i, label in enumerate(labels):
+            r = pygame.Rect(config.BOX_LEFT + i * (bw + gap), by, bw, bh)
+            color = (200, 200, 80) if label != "BACK" else (140, 140, 140)
+            self.act_buttons.append({
+                "rect": r, "label": label, "hover": 0.0, "color": color,
+            })
+        self.phase = self.PHASE_ACT_MENU
+
+    def _on_act(self, label):
+        if label == "BACK":
+            _sfx("menu")
+            self.phase = self.PHASE_PLAYER
+            return
+        _sfx("select")
+        for a in self.level["acts"]:
+            if a["label"] == label:
+                self.mercy = min(self.mercy_threshold, self.mercy + a.get("mercy", 0))
+                self._start_dialog(a["lines"], after=self._begin_enemy_turn)
+                return
+
+    def _begin_enemy_turn(self):
+        self.phase = self.PHASE_ENEMY
+        self.pattern = bullets_mod.make_pattern(self.pattern_id)
+        self.bullets = []
+        self.turn_elapsed = 0.0
+        self.heart_x = float(config.BOX_CENTER_X)
+        self.heart_y = float(config.BOX_CENTER_Y)
+        self.soul_mode = config.SOUL_RED
+        self.vel_y = 0.0
+        self.on_ground = False
+        self.invuln = 0
+
+    def _end_victory(self):
+        if _AUDIO:
+            try: audio.stop_bgm()
+            except Exception: pass
+        self.result = 'win'
+
+    def _end_defeat(self):
+        if _AUDIO:
+            try: audio.stop_bgm()
+            except Exception: pass
+        self.result = 'lose'
+
+    # ------------------------------------------------------------------
+    def _update_enemy_turn(self, dt, finger_norm, tracker):
         self._enter_mode(tracker.gesture)
         self.shield_angle = tracker.angle
 
-        # 2) 位置更新 (依模式)
         box_rect = (config.BOX_LEFT, config.BOX_TOP,
                     config.BOX_WIDTH, config.BOX_HEIGHT)
         mapped = tracker.map_to_rect(finger_norm, box_rect)
@@ -94,17 +340,13 @@ class BattleScene:
                 self.heart_y = clamp(mapped[1],
                                      config.BOX_TOP + config.HEART_SIZE // 2,
                                      config.BOX_BOTTOM - config.HEART_SIZE // 2)
-
         elif self.soul_mode == config.SOUL_BLUE:
-            # X 跟手指；Y 由重力決定
             if mapped is not None:
                 self.heart_x = clamp(mapped[0],
                                      config.BOX_LEFT + config.HEART_SIZE // 2,
                                      config.BOX_RIGHT - config.HEART_SIZE // 2)
-
             self.vel_y += config.GRAVITY * dt
             self.heart_y += self.vel_y * dt
-
             floor_y = self._floor_y()
             ceiling_y = config.BOX_TOP + config.HEART_SIZE / 2 + 2
             if self.heart_y >= floor_y:
@@ -115,35 +357,24 @@ class BattleScene:
                 self.on_ground = False
             if self.heart_y < ceiling_y:
                 self.heart_y = ceiling_y
-                if self.vel_y < 0:
-                    self.vel_y = 0.0
-
-            # 跳躍：偵測食指快速向上揮
+                if self.vel_y < 0: self.vel_y = 0.0
             if self.jump_cooldown > 0:
                 self.jump_cooldown = max(0.0, self.jump_cooldown - dt)
             elif tracker.vy_norm < config.JUMP_VY_THRESHOLD and self.on_ground:
                 self.vel_y = -config.JUMP_VELOCITY
                 self.jump_cooldown = config.JUMP_COOLDOWN
                 self.on_ground = False
-
         elif self.soul_mode == config.SOUL_GREEN:
-            # 心釘在中央
             self.heart_x = float(config.BOX_CENTER_X)
             self.heart_y = float(config.BOX_CENTER_Y)
 
-        # 3) 攻擊模式產生子彈
         self.pattern.update(dt, self.bullets)
 
-        # 4) 更新子彈 + 碰撞
         hb = heart_rect(self.heart_x, self.heart_y)
         for b in self.bullets:
             b.update(dt)
-            if not b.alive:
-                continue
-
-            # 綠心：先檢查盾 (對普通子彈與骨頭有效，雷射例外)
-            if self.soul_mode == config.SOUL_GREEN and not isinstance(
-                    b, bullets_mod.LaserBeam):
+            if not b.alive: continue
+            if self.soul_mode == config.SOUL_GREEN and not isinstance(b, bullets_mod.LaserBeam):
                 if isinstance(b, bullets_mod.BoneBullet):
                     cx, cy = b.rect().center
                 else:
@@ -153,34 +384,33 @@ class BattleScene:
                     b.alive = False
                     self.blocked_flash_t = 0.12
                     continue
-
             if self.invuln <= 0 and b.hits(hb):
-                self.hp -= b.damage
+                dmg = b.damage
+                self.hp -= dmg
                 self.invuln = config.INVULN_FRAMES
                 self.shake_t = 0.25
+                self.red_flash_t = 0.3
+                _sfx("hit")
+                self.damage_numbers.append({
+                    "x": self.heart_x + random.randint(-8, 8),
+                    "y": self.heart_y - 20, "vy": -60, "t": 0,
+                    "val": dmg, "color": config.HEART_RED,
+                })
                 if not isinstance(b, bullets_mod.LaserBeam):
                     b.alive = False
-
         self.bullets = [b for b in self.bullets if b.alive]
 
-        if self.invuln > 0:
-            self.invuln -= 1
-        if self.shake_t > 0:
-            self.shake_t -= dt
-        if self.mode_flash_t > 0:
-            self.mode_flash_t -= dt
-        if self.blocked_flash_t > 0:
-            self.blocked_flash_t -= dt
+        if self.invuln > 0: self.invuln -= 1
 
-        # 5) 時間 / 勝負
-        self.elapsed += dt
+        self.turn_elapsed += dt
         if self.hp <= 0:
             self.hp = 0
-            self.result = 'lose'
-        elif self.elapsed >= self.duration:
-            self.result = 'win'
-
-        return self.result
+            self._end_defeat()
+            return
+        if self.turn_elapsed >= self.turn_duration:
+            self.bullets = []
+            self.pattern = None
+            self.phase = self.PHASE_PLAYER
 
     # ------------------------------------------------------------------
     def draw(self, surf, camera_frame=None, camera_error=None):
@@ -190,102 +420,185 @@ class BattleScene:
 
         surf.fill(config.BLACK)
 
-        # 標題列
+        # 關卡名
         draw_text_center(surf, self.font_mid, self.level["name"],
-                         config.SCREEN_WIDTH // 2, 50, self.level["color"])
-        remain = max(0.0, self.duration - self.elapsed)
-        draw_text_center(surf, self.font_small,
-                         f"撐過 {self.duration} 秒  |  剩餘 {remain:4.1f} s",
-                         config.SCREEN_WIDTH // 2, 92, config.WHITE)
+                         config.SCREEN_WIDTH // 2, 36, self.level["color"])
+        # 敵人名 (mercy 滿時黃光)
+        enemy_color = (config.YELLOW
+                       if self.mercy >= self.mercy_threshold
+                       else config.WHITE)
+        draw_text_center(surf, self.font_mid, self.enemy_name,
+                         config.SCREEN_WIDTH // 2, 88, enemy_color)
+        # 敵人 HP 條
+        ebw, ebh = 280, 10
+        ebx = (config.SCREEN_WIDTH - ebw) // 2
+        eby = 116
+        pygame.draw.rect(surf, config.DARK_GREY, (ebx, eby, ebw, ebh))
+        eratio = self.enemy_hp / max(1, self.enemy_hp_max)
+        pygame.draw.rect(surf, config.HEART_RED,
+                         (ebx, eby, int(ebw * eratio), ebh))
+        pygame.draw.rect(surf, config.WHITE, (ebx, eby, ebw, ebh), 1)
 
-        # HP 條
-        bar_w = 360
-        bar_h = 22
-        bar_x = (config.SCREEN_WIDTH - bar_w) // 2
-        bar_y = 120
-        pygame.draw.rect(surf, config.DARK_GREY,
-                         (bar_x, bar_y, bar_w, bar_h), border_radius=6)
-        ratio = self.hp / self.level["hp"]
-        pygame.draw.rect(surf, config.YELLOW,
-                         (bar_x, bar_y, int(bar_w * ratio), bar_h),
-                         border_radius=6)
-        pygame.draw.rect(surf, config.WHITE,
-                         (bar_x, bar_y, bar_w, bar_h), 2, border_radius=6)
-        draw_text_center(surf, self.font_small,
-                         f"HP  {self.hp:>3} / {self.level['hp']}",
-                         bar_x + bar_w // 2, bar_y + bar_h // 2, config.BLACK)
+        # 中央區塊
+        if self.phase == self.PHASE_DIALOG:
+            # 對話框替代戰鬥框
+            self.dialog.rect.topleft = (config.BOX_LEFT + shake[0],
+                                         config.BOX_TOP + shake[1])
+            self.dialog.draw(surf, bg=config.BLACK,
+                              border_color=config.WHITE,
+                              border_w=config.BOX_BORDER, padding=22)
+        else:
+            box = pygame.Rect(config.BOX_LEFT + shake[0],
+                              config.BOX_TOP + shake[1],
+                              config.BOX_WIDTH, config.BOX_HEIGHT)
+            pygame.draw.rect(surf, config.WHITE, box, config.BOX_BORDER)
 
-        # 戰鬥框 (套 shake)
-        box = pygame.Rect(config.BOX_LEFT + shake[0],
-                          config.BOX_TOP + shake[1],
-                          config.BOX_WIDTH, config.BOX_HEIGHT)
-        pygame.draw.rect(surf, config.WHITE, box, config.BOX_BORDER)
+            if self.phase == self.PHASE_ENEMY:
+                # 藍心地板提示
+                if self.soul_mode == config.SOUL_BLUE:
+                    floor_y = self._floor_y() + config.HEART_SIZE / 2 + 2
+                    pygame.draw.line(surf, (90, 90, 130),
+                                     (config.BOX_LEFT + shake[0],
+                                      floor_y + shake[1]),
+                                     (config.BOX_RIGHT + shake[0],
+                                      floor_y + shake[1]),
+                                     2)
+                prev_clip = surf.get_clip()
+                surf.set_clip(box)
+                for b in self.bullets:
+                    b.draw(surf)
+                if self.soul_mode == config.SOUL_GREEN:
+                    shield_color = ((160, 255, 160)
+                                    if self.blocked_flash_t > 0
+                                    else config.SOUL_COLORS[config.SOUL_GREEN])
+                    draw_shield_bar(surf,
+                                    self.heart_x + shake[0],
+                                    self.heart_y + shake[1],
+                                    self.shield_angle, shield_color)
+                # 心 (閃爍 / 切換光暈)
+                if self.invuln <= 0 or (self.invuln // 4) % 2 == 0:
+                    heart_color = config.SOUL_COLORS[self.soul_mode]
+                    hs = config.HEART_SIZE
+                    if self.mode_flash_t > 0:
+                        pygame.draw.circle(
+                            surf, config.WHITE,
+                            (int(self.heart_x + shake[0]),
+                             int(self.heart_y + shake[1])),
+                            int(hs * 1.5), 2)
+                        hs = int(hs * 1.15)
+                    draw_heart(surf,
+                               self.heart_x + shake[0],
+                               self.heart_y + shake[1],
+                               size=hs, color=heart_color)
+                surf.set_clip(prev_clip)
+                # 模式指示器
+                mi_x = max(20, config.BOX_LEFT - 100)
+                mi_y = config.BOX_TOP + 8
+                draw_mode_indicator(surf, self.font_small,
+                                    self.soul_mode, mi_x, mi_y)
+            else:
+                # PLAYER / ACT_MENU:框內顯示敵人對話圖示
+                tip = "* 你的回合。" if self.phase == self.PHASE_PLAYER else "* 想做什麼?"
+                ts = self.font_small.render(tip, True, config.WHITE)
+                surf.blit(ts, (box.left + 22, box.top + 22))
 
-        # 藍心：畫地板提示線
-        if self.soul_mode == config.SOUL_BLUE:
-            floor_y = self._floor_y() + config.HEART_SIZE / 2 + 2
-            pygame.draw.line(surf, (90, 90, 130),
-                             (config.BOX_LEFT + shake[0], floor_y + shake[1]),
-                             (config.BOX_RIGHT + shake[0], floor_y + shake[1]),
-                             2)
+        # 行動按鈕
+        if self.phase == self.PHASE_PLAYER:
+            self._draw_buttons(surf, self.action_buttons)
+        elif self.phase == self.PHASE_ACT_MENU:
+            self._draw_buttons(surf, self.act_buttons)
 
-        # 用 clip 將子彈限制在框內顯示
-        prev_clip = surf.get_clip()
-        surf.set_clip(box)
-        for b in self.bullets:
-            b.draw(surf)
+        # 玩家 HUD
+        self._draw_player_hud(surf)
 
-        # 綠心盾
-        if self.soul_mode == config.SOUL_GREEN:
-            shield_color = (160, 255, 160) if self.blocked_flash_t > 0 \
-                else config.SOUL_COLORS[config.SOUL_GREEN]
-            draw_shield_bar(surf,
-                            self.heart_x + shake[0],
-                            self.heart_y + shake[1],
-                            self.shield_angle,
-                            shield_color)
+        # 受傷紅光全螢幕邊框
+        if self.red_flash_t > 0:
+            alpha = int(140 * (self.red_flash_t / 0.3))
+            overlay = pygame.Surface((config.SCREEN_WIDTH, config.SCREEN_HEIGHT),
+                                     pygame.SRCALPHA)
+            pygame.draw.rect(overlay, (255, 30, 30, alpha),
+                             overlay.get_rect(), 28)
+            surf.blit(overlay, (0, 0))
 
-        # 心 (依模式變色；無敵時閃爍；切換瞬間白色光暈)
-        if self.invuln <= 0 or (self.invuln // 4) % 2 == 0:
-            heart_color = config.SOUL_COLORS[self.soul_mode]
-            heart_size = config.HEART_SIZE
-            if self.mode_flash_t > 0:
-                # 切換瞬間放大 + 白色外圈
-                pygame.draw.circle(surf, config.WHITE,
-                                   (int(self.heart_x + shake[0]),
-                                    int(self.heart_y + shake[1])),
-                                   int(heart_size * 1.3), 2)
-                heart_size = int(heart_size * 1.15)
-            draw_heart(surf,
-                       self.heart_x + shake[0],
-                       self.heart_y + shake[1],
-                       size=heart_size, color=heart_color)
-        surf.set_clip(prev_clip)
+        # 傷害數字 (浮上去)
+        for d in self.damage_numbers:
+            alpha = max(0, int(255 * (1.0 - d["t"] / 0.8)))
+            ds = self.font_mid.render(f"{d['val']}", True, d["color"])
+            ds.set_alpha(alpha)
+            surf.blit(ds, ds.get_rect(center=(int(d["x"]), int(d["y"]))))
 
-        # 模式指示器 (戰鬥框左側)
-        mi_x = max(20, config.BOX_LEFT - 100)
-        mi_y = config.BOX_TOP + 8
-        draw_mode_indicator(surf, self.font_small, self.soul_mode, mi_x, mi_y)
+        # 游標愛心 (僅選單階段)
+        if self.phase in (self.PHASE_PLAYER, self.PHASE_ACT_MENU):
+            draw_heart(surf, self.cursor[0], self.cursor[1],
+                       size=14, color=config.HEART_RED)
+            pygame.draw.circle(surf, config.WHITE, self.cursor, 22, 1)
 
         # 提示
-        hint = self._mode_hint()
-        draw_text_center(surf, self.font_small, hint,
+        draw_text_center(surf, self.font_small, self._phase_hint(),
                          config.SCREEN_WIDTH // 2,
-                         config.SCREEN_HEIGHT - 24, config.GREY)
+                         config.SCREEN_HEIGHT - 14, config.GREY)
 
-        # 攝影機預覽 (右上)
+        # 攝影機 + 無鏡頭橫幅
         draw_camera_preview(surf, camera_frame,
                             font=self.font_small, error_msg=camera_error)
-
-        # 無鏡頭橫幅
         draw_no_camera_banner(surf, self.font_small, camera_error)
 
-    def _mode_hint(self):
-        if self.soul_mode == config.SOUL_RED:
-            return "☝ 紅心：自由移動  /  ✌ 切藍心  /  🖐 切綠心"
-        if self.soul_mode == config.SOUL_BLUE:
-            return "✌ 藍心：手快速上揮 = 跳！  X 軸跟食指"
-        return "🖐 綠心：心固定，盾隨食指方向旋轉擋彈"
+    # ------------------------------------------------------------------
+    def _draw_buttons(self, surf, buttons):
+        for b in buttons:
+            r = b["rect"]
+            hr = b["hover"] / config.TURN_HOVER_SECONDS
+            color = b["color"]
+            bg = tuple(min(255, int(c * (0.18 + 0.55 * hr))) for c in color)
+            pygame.draw.rect(surf, bg, r)
+            pygame.draw.rect(surf, color, r, 3)
+            ts = self.font_mid.render(b["label"], False, config.WHITE)
+            surf.blit(ts, ts.get_rect(center=r.center))
+            if hr > 0:
+                pygame.draw.rect(surf, config.WHITE,
+                                 (r.left + 6, r.bottom - 6,
+                                  int((r.width - 12) * hr), 3))
+
+    def _draw_player_hud(self, surf):
+        y = config.BOX_BOTTOM + 86
+        font = self.font_small
+        x = config.BOX_LEFT
+        # FRISK
+        ts = font.render("FRISK", False, config.WHITE)
+        surf.blit(ts, (x, y)); x += ts.get_width() + 28
+        # LV
+        ts = font.render("LV 1", False, config.WHITE)
+        surf.blit(ts, (x, y)); x += ts.get_width() + 28
+        # HP label
+        ts = font.render("HP", False, config.YELLOW)
+        surf.blit(ts, (x, y)); x += ts.get_width() + 8
+        # HP bar
+        bw = 140; bh = font.get_height() - 4
+        pygame.draw.rect(surf, config.RED, (x, y + 2, bw, bh))
+        ratio = max(0.0, self.hp / self.hp_max)
+        pygame.draw.rect(surf, config.YELLOW, (x, y + 2, int(bw * ratio), bh))
+        x += bw + 10
+        # numbers
+        ts = font.render(f"{self.hp} / {self.hp_max}", False, config.WHITE)
+        surf.blit(ts, (x, y)); x += ts.get_width() + 30
+        # ITEM
+        ts = font.render(f"ITEM x {self.items}", False, config.WHITE)
+        surf.blit(ts, (x, y))
+
+    def _phase_hint(self):
+        if self.phase == self.PHASE_DIALOG:
+            return "..."
+        if self.phase == self.PHASE_PLAYER:
+            return "懸停按鈕 1 秒確認"
+        if self.phase == self.PHASE_ACT_MENU:
+            return "選擇行動,或 BACK 返回"
+        if self.phase == self.PHASE_ENEMY:
+            if self.soul_mode == config.SOUL_RED:
+                return "紅心:自由移動 / ✌ 切藍心 / 🖐 切綠心"
+            if self.soul_mode == config.SOUL_BLUE:
+                return "藍心:上揮跳!  X 軸跟食指"
+            return "綠心:心固定 / 盾隨食指方向"
+        return ""
 
 
 class ResultScene:

@@ -13,6 +13,13 @@ from hand_tracker import HandTracker
 from menu import LevelMenu
 from game import BattleScene, ResultScene
 
+try:
+    import audio
+    _AUDIO = True
+except Exception as e:
+    print(f"[警告] 無法載入 audio 模組:{e}")
+    _AUDIO = False
+
 
 def get_fonts():
     """嘗試使用支援中文的字型，找不到則回退到預設字型。"""
@@ -35,10 +42,26 @@ def get_fonts():
 
 
 def main():
+    # 必須在 pygame.init 之前 pre_init 才能低延遲播音訊
+    try:
+        pygame.mixer.pre_init(44100, -16, 2, 512)
+    except pygame.error:
+        pass
     pygame.init()
     pygame.display.set_caption(config.TITLE)
-    screen = pygame.display.set_mode((config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
+    # 全螢幕；SCALED 讓內部維持 960x720 邏輯解析度，pygame 自動縮放到實際螢幕
+    screen = pygame.display.set_mode(
+        (config.SCREEN_WIDTH, config.SCREEN_HEIGHT),
+        pygame.FULLSCREEN | pygame.SCALED,
+    )
     clock = pygame.time.Clock()
+
+    if _AUDIO:
+        try:
+            audio.init()
+            audio.play_bgm("menu", volume=0.35)
+        except Exception as e:
+            print(f"[警告] 音訊啟動失敗：{e}")
 
     font_big, font_mid, font_small = get_fonts()
 
@@ -75,6 +98,9 @@ def main():
                         else:
                             state = "MENU"
                             menu.reset()
+                            if _AUDIO:
+                                try: audio.play_bgm("menu", volume=0.35)
+                                except Exception: pass
                     elif event.key == pygame.K_F1:
                         start_battle(config.LEVELS[2])
                     elif state == "MENU" and event.key in (
@@ -88,6 +114,9 @@ def main():
                         elif event.key == pygame.K_RETURN:
                             state = "MENU"
                             menu.reset()
+                            if _AUDIO:
+                                try: audio.play_bgm("menu", volume=0.35)
+                                except Exception: pass
 
             frame, finger_norm = tracker.read()
 
@@ -112,6 +141,9 @@ def main():
                 if choice == 'menu':
                     state = "MENU"
                     menu.reset()
+                    if _AUDIO:
+                        try: audio.play_bgm("menu", volume=0.35)
+                        except Exception: pass
                 elif choice == 'retry':
                     start_battle(current_level)
 
