@@ -67,6 +67,14 @@ class SpearBullet(Bullet):
         super().__init__(x, y, vx, vy, damage=damage, radius=6, color=color)
         self.length = length
         self.thickness = thickness
+        # 上一幀座標,用於快速移動時的 swept hit-test
+        self.prev_x = float(x)
+        self.prev_y = float(y)
+
+    def update(self, dt):
+        self.prev_x = self.x
+        self.prev_y = self.y
+        super().update(dt)
 
     def _polygon(self):
         ang = math.atan2(self.vy, self.vx)
@@ -87,8 +95,36 @@ class SpearBullet(Bullet):
         pygame.draw.polygon(surf, config.WHITE, pts, 2)
 
     def hits(self, heart_rect):
-        # 用中心點 + 半徑近似 (足夠遊戲手感)
-        return heart_rect.collidepoint(self.x, self.y)
+        # 用「沿矛身多點 + 上一幀位置 swept」的近似命中測試:
+        # 1) 矛本體是長 polygon (length≈46, 含頭尾尖端共約 68px), 只測中心點
+        #    在高速 (GREEN 階段 500 px/s) 會有矛尖穿過心、但中心沒進入 hitbox 的破綻;
+        # 2) 一幀 16ms × 500 px/s = 8 px, 加上心 22 px hitbox 雖然不容易 tunneling,
+        #    但矛若以斜角從邊緣劃過,中心仍可能整段都不在 hitbox 內 → 表現為「明明畫面打中卻沒扣血」。
+        # 解法:沿著矛軸方向取 5 個點 (頭尾尖端 + 中心 + 兩個 1/4 位置),
+        # 並對「上一幀的本體」與「這一幀的本體」之間用線性插值再多取一組,確保連續命中。
+        ang = math.atan2(self.vy, self.vx)
+        cos_a, sin_a = math.cos(ang), math.sin(ang)
+        hl = self.length / 2
+        offsets = (-hl - 8, -hl / 2, 0.0, hl / 2, hl + 10)
+        # 主要:對「現在」+「上一幀」兩個位置都做多點測試
+        for base_x, base_y in ((self.x, self.y), (self.prev_x, self.prev_y)):
+            for off in offsets:
+                px = base_x + cos_a * off
+                py = base_y + sin_a * off
+                if heart_rect.collidepoint(px, py):
+                    return True
+        # 補強:位移大於矛長時,中間補一個取樣點防 tunneling
+        dx = self.x - self.prev_x
+        dy = self.y - self.prev_y
+        step2 = dx * dx + dy * dy
+        if step2 > (self.length * 0.5) ** 2:
+            mid_x = (self.x + self.prev_x) * 0.5
+            mid_y = (self.y + self.prev_y) * 0.5
+            for off in offsets:
+                if heart_rect.collidepoint(mid_x + cos_a * off,
+                                           mid_y + sin_a * off):
+                    return True
+        return False
 
 
 class BoneBullet:

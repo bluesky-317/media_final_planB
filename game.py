@@ -238,6 +238,20 @@ class BattleScene:
 
     def _do_fight(self):
         _sfx("select")
+        # 若該關卡設定了 dodge_chance,先擲骰判斷是否被閃開 (Sans 50%)
+        dodge_chance = self.level.get("dodge_chance", 0.0)
+        if dodge_chance > 0 and random.random() < dodge_chance:
+            self.damage_numbers.append({
+                "x": config.SCREEN_WIDTH // 2 + random.randint(-30, 30),
+                "y": 140, "vy": -55, "t": 0,
+                "val": "MISS", "color": config.GREY,
+            })
+            _sfx("menu")
+            dodge_lines = self.level.get(
+                "dodge_lines", ["你揮拳!", "...但是沒打中。"])
+            self._start_dialog(dodge_lines, after=self._begin_enemy_turn)
+            return
+
         dmg = random.randint(7, 13)
         self.enemy_hp = max(0, self.enemy_hp - dmg)
         self.damage_numbers.append({
@@ -431,19 +445,20 @@ class BattleScene:
 
         surf.fill(config.BLACK)
 
-        # 關卡名
+        # 關卡名 (y 從 36 → 46:讓出頂部給「鍵盤模式」紅色橫幅,
+        # 沒紅幅的一般模式視覺差異微乎其微)
         draw_text_center(surf, self.font_mid, self.level["name"],
-                         config.SCREEN_WIDTH // 2, 36, self.level["color"])
+                         config.SCREEN_WIDTH // 2, 46, self.level["color"])
         # 敵人名 (mercy 滿時黃光)
         enemy_color = (config.YELLOW
                        if self.mercy >= self.mercy_threshold
                        else config.WHITE)
         draw_text_center(surf, self.font_mid, self.enemy_name,
-                         config.SCREEN_WIDTH // 2, 88, enemy_color)
+                         config.SCREEN_WIDTH // 2, 92, enemy_color)
         # 敵人 HP 條
         ebw, ebh = 280, 10
         ebx = (config.SCREEN_WIDTH - ebw) // 2
-        eby = 116
+        eby = 120
         pygame.draw.rect(surf, config.DARK_GREY, (ebx, eby, ebw, ebh))
         eratio = self.enemy_hp / max(1, self.enemy_hp_max)
         pygame.draw.rect(surf, config.HEART_RED,
@@ -595,14 +610,35 @@ class BattleScene:
 
     # ------------------------------------------------------------------
     def _draw_buttons(self, surf, buttons):
+        # MERCY 集滿後改用黃色脈動,讓玩家一眼看出可以饒恕
+        mercy_ready = (self.mercy_threshold < 99
+                       and self.mercy >= self.mercy_threshold)
+        pulse = 0.5 + 0.5 * math.sin(pygame.time.get_ticks() * 0.006)
+        # ACT 子選單按鈕窄 (Undyne 5 顆鈕 / Froggit 4 顆),原本固定 font_btn
+        # 會讓 "Compliment" "Challenge" 這類長字超出按鈕。依文字寬度動態縮字。
+        font_candidates = (self.font_btn, self.font_small, self.font_tiny)
         for b in buttons:
             r = b["rect"]
             hr = b["hover"] / config.TURN_HOVER_SECONDS
             color = b["color"]
+            if b["label"] == "MERCY" and mercy_ready:
+                color = config.YELLOW
             bg = tuple(min(255, int(c * (0.18 + 0.55 * hr))) for c in color)
+            if b["label"] == "MERCY" and mercy_ready and hr <= 0:
+                # 集滿時即使沒被 hover 也底色亮一點 + 隨脈動
+                bg = tuple(min(255, int(c * (0.30 + 0.35 * pulse)))
+                           for c in color)
             pygame.draw.rect(surf, bg, r)
-            pygame.draw.rect(surf, color, r, 3)
-            ts = self.font_btn.render(b["label"], False, config.WHITE)
+            border_w = 4 if (b["label"] == "MERCY" and mercy_ready) else 3
+            pygame.draw.rect(surf, color, r, border_w)
+            # 選一個能塞進按鈕的字體 (留 12 px 左右內邊距)
+            inner_w = r.width - 12
+            label_font = font_candidates[-1]
+            for cf in font_candidates:
+                if cf.size(b["label"])[0] <= inner_w:
+                    label_font = cf
+                    break
+            ts = label_font.render(b["label"], False, config.WHITE)
             surf.blit(ts, ts.get_rect(center=r.center))
             if hr > 0:
                 pygame.draw.rect(surf, config.WHITE,
@@ -630,10 +666,22 @@ class BattleScene:
         x += bw + 10
         # numbers
         ts = font.render(f"{self.hp} / {self.hp_max}", False, config.WHITE)
-        surf.blit(ts, (x, y)); x += ts.get_width() + 30
+        surf.blit(ts, (x, y)); x += ts.get_width() + 24
         # ITEM
         ts = font.render(f"ITEM x {self.items}", False, config.WHITE)
-        surf.blit(ts, (x, y))
+        surf.blit(ts, (x, y)); x += ts.get_width() + 24
+        # MERCY 進度 (Sans 的 threshold=99 視為「無法饒恕」)
+        if self.mercy_threshold >= 99:
+            ts = font.render("MERCY —", False, config.GREY)
+            surf.blit(ts, (x, y))
+        else:
+            ready = self.mercy >= self.mercy_threshold
+            label_color = config.YELLOW if ready else config.WHITE
+            ts = font.render(
+                f"MERCY {self.mercy}/{self.mercy_threshold}"
+                + ("  READY!" if ready else ""),
+                False, label_color)
+            surf.blit(ts, (x, y))
 
     def _phase_hint(self):
         if self.phase == self.PHASE_DIALOG:

@@ -104,8 +104,8 @@ media_final1/
 └─ assets/
    └─ audio/
       ├─ bgm_menu.ogg         ← 主選單 BGM
-      ├─ bgm_level1.ogg       ← Level 1 (Undyne) BGM
-      ├─ bgm_level2.ogg       ← Level 2 (Froggit) BGM
+      ├─ bgm_level1.ogg       ← Level 1 (Froggit) BGM
+      ├─ bgm_level2.ogg       ← Level 2 (Undyne) BGM
       ├─ bgm_level3.ogg       ← Level 3 (Sans) BGM
       ├─ blip.wav             ← (可選) 打字機文字音
       ├─ select.wav           ← (可選) 按鈕確認音
@@ -123,8 +123,8 @@ media_final1/
 | 想播放於 | 檔名(去掉副檔名) |
 |---|---|
 | 主選單 | `bgm_menu` |
-| 第 1 關 (Undyne) | `bgm_level1` |
-| 第 2 關 (Froggit) | `bgm_level2` |
+| 第 1 關 (Froggit) | `bgm_level1` |
+| 第 2 關 (Undyne) | `bgm_level2` |
 | 第 3 關 (Sans) | `bgm_level3` |
 
 副檔名可以是 `.ogg` / `.wav` / `.mp3`(依順序找,找到哪個用哪個)。
@@ -165,8 +165,8 @@ media_final1/
 
 ```
 assets/images/enemies/
-├─ Undyne.gif    ← Level 1
-├─ Froggit.gif   ← Level 2
+├─ Froggit.gif   ← Level 1
+├─ Undyne.gif    ← Level 2
 └─ Sans.gif      ← Level 3
 ```
 
@@ -205,10 +205,10 @@ assets/images/enemies/
 
 | 動作 | 效果 |
 |---|---|
-| **FIGHT** | 對敵人扣 7~13 HP;扣到 0 → 勝利 (擊倒) |
-| **ACT** | 開啟子選單(每關不同),選不同 ACT 對話 + 累積 MERCY 點數 |
+| **FIGHT** | 對敵人扣 7~13 HP;扣到 0 → 勝利 (擊倒)。**Sans 有 50% 機率閃開**(顯示 MISS 不扣血,而且仍會輪到敵人回合) |
+| **ACT** | 開啟子選單(每關不同),選不同 ACT 對話 + 累積 **MERCY 點數**(HUD 會即時顯示 `MERCY x/y`) |
 | **ITEM** | 吃一塊怪物糖回 **10 HP**,每場限 **3 顆** |
-| **MERCY** | MERCY 點數達門檻時可成功饒恕 → 勝利 (饒恕);不夠則對方拒絕 |
+| **MERCY** | MERCY 點數達門檻時可成功饒恕 → 勝利 (饒恕);不夠則對方拒絕。**集滿後 MERCY 鈕會變黃色脈動**,HUD 額外顯示 `READY!` |
 
 懸停在按鈕上 **1 秒**會確認(比主選單的 1.5 秒快)。
 
@@ -248,19 +248,23 @@ assets/images/enemies/
 
 | Lv | 敵人 | 敵 HP | 回合長度 | 彈幕 | 強制靈魂 | MERCY 門檻 |
 |----|------|------|----------|------|----------|------------|
-| 1 | **Undyne** (中等) | 60 | 9 秒 | 自由 RED 矛雨 ↔ GREEN 四向矛 | RED 2.5s ↔ GREEN 3.5s | 3 次 ACT |
-| 2 | Froggit (簡單) | 30 | 6 秒 | 綠色蒼蠅從四面緩飛 | 全程 RED | 2 次 ACT |
+| 1 | Froggit (簡單) | 30 | 6 秒 | 綠色蒼蠅從四面緩飛 | 全程 RED | 2 次 ACT |
+| 2 | **Undyne** (中等) | 60 | 9 秒 | 自由 RED 矛雨 ↔ GREEN 四向矛 | RED 2.5s ↔ GREEN 3.5s | 3 次 ACT |
 | 3 | **Sans** (困難) | 40 | 12 秒 | 自由 RED 骨頭+雷射 ↔ BLUE 跳骨牆 | RED 3.5s ↔ BLUE 3.0s | 無法饒恕,只能 FIGHT |
 
 > 雷射有 0.7 秒「紅色虛線預警」→ 0.35 秒「白色實心光束」(扣血 20),看到紅線就要躲。
 > 綠心的盾**無法擋雷射**(光束太寬)。
-> Sans 的 `mercy_threshold` 設成 99 → 無法靠 ACT 饒恕,**必須打到 HP 歸零**。
+> Sans 的 `mercy_threshold` 設成 99 → 無法靠 ACT 饒恕,**必須打到 HP 歸零**;且他 **有 50% 機率閃開** FIGHT (`dodge_chance: 0.5`),所以實際需要更多次揮拳才能擊倒。
+> 矛 (Undyne) 的命中判定用**沿矛身多點 + 上一幀位置 swept 取樣**,避免高速階段 (綠心 500 px/s) 矛尖穿過心、中心點卻沒進入 hitbox 而「明明畫面打中卻沒扣血」的破綻。
 
 ### 各關 ACT 選項
 
-- **Undyne**:Check / Plead / Cheer / Challenge(Plead / Cheer / Challenge 各 +1 mercy)
-- **Froggit**:Check / Compliment / Threat(後兩者各 +1 mercy)
-- **Sans**:Check / Talk(皆 +0 mercy,純粹氣氛用)
+- **Froggit**:Check / Compliment / Threat(後兩者各 +1 mercy,門檻 2 → ACT 2 次後 MERCY 可饒恕)
+- **Undyne**:Check / Plead / Cheer / Challenge(Plead / Cheer / Challenge 各 +1 mercy,門檻 3 → ACT 3 次後 MERCY 可饒恕)
+- **Sans**:Check / Talk(皆 +0 mercy,純粹氣氛用 — 門檻 99 鎖死饒恕路線)
+
+> 玩家 HUD 會即時顯示 `MERCY x/y`,達到門檻時數字變黃且加上 `READY!`,同時 MERCY 鈕本身會變成黃色脈動。
+> 也就是說,**選 ACT 後不要忘了再回 PLAYER 階段點 MERCY**,點數對了直接饒恕勝利。
 
 ---
 
@@ -452,8 +456,8 @@ A: 目前對話會自動播完,沒有快轉鍵。要快可把 `game.py` 的 `cha
 ## 參考連結
 
 ### BGM 來源範例
-- Level 1 (Undyne): https://www.youtube.com/watch?v=xhklZR11iaE
-- Level 2 (Froggit): https://www.youtube.com/watch?v=g6aia0GQMRw
+- Level 1 (Froggit): https://www.youtube.com/watch?v=g6aia0GQMRw
+- Level 2 (Undyne): https://www.youtube.com/watch?v=xhklZR11iaE
 - Level 3 (Sans): https://www.youtube.com/watch?v=PpDvm1X6zG0
 
 ### 怪物 GIF 來源

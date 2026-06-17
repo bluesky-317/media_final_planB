@@ -64,13 +64,14 @@ class LevelMenu:
     def draw(self, surf, camera_frame=None, camera_error=None):
         surf.fill(config.BLACK)
 
-        # 標題
+        # 標題:HandTale → 副標 → 懸停提示。
+        # 三層垂直分開,避免大字 (font_big 64) 與粗體 CJK 字型上下衝撞。
         draw_text_center(surf, self.font_big, "HandTale",
-                         config.SCREEN_WIDTH // 2, 110, config.WHITE)
+                         config.SCREEN_WIDTH // 2, 90, config.WHITE)
         draw_text_center(surf, self.font_mid, "用『右手食指』選擇關卡",
-                         config.SCREEN_WIDTH // 2, 180, config.YELLOW)
+                         config.SCREEN_WIDTH // 2, 170, config.YELLOW)
         draw_text_center(surf, self.font_small, "懸停 1.5 秒以確認",
-                         config.SCREEN_WIDTH // 2, 218, config.GREY)
+                         config.SCREEN_WIDTH // 2, 210, config.GREY)
 
         # 按鈕
         for b in self.buttons:
@@ -86,14 +87,19 @@ class LevelMenu:
 
             # 關卡編號
             num_surf = self.font_big.render(str(lv["id"]), True, config.WHITE)
-            num_rect = num_surf.get_rect(center=(r.centerx, r.top + 56))
+            num_rect = num_surf.get_rect(center=(r.centerx, r.top + 50))
             surf.blit(num_surf, num_rect)
 
-            # 名稱 / 副標
+            # 名稱 / 副標 — 名稱用 font_small,副標長字串改 font_tiny 並做超寬截斷
             draw_text_center(surf, self.font_small, lv["name"],
-                             r.centerx, r.centery + 22, config.WHITE)
-            draw_text_center(surf, self.font_small, lv["subtitle"],
-                             r.centerx, r.centery + 48, (220, 220, 220))
+                             r.centerx, r.centery + 18, config.WHITE)
+            sub = lv["subtitle"]
+            sub_font = self.font_small
+            # 若副標仍寬於按鈕內側,改用更小的 font_tiny,避免溢到隔壁按鈕
+            if sub_font.size(sub)[0] > r.width - 24:
+                sub_font = self.font_tiny
+            draw_text_center(surf, sub_font, sub,
+                             r.centerx, r.centery + 44, (220, 220, 220))
 
             # 懸停進度條
             bar_x = r.left + 16

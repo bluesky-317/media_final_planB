@@ -172,22 +172,28 @@ def draw_camera_preview(surf, frame_bgr, font=None, error_msg=None):
 
 
 def draw_no_camera_banner(surf, font, msg):
-    """底部紅色橫幅，提示用戶目前處於無輸入模式。"""
+    """頂部紅色細橫幅,提示用戶目前處於無輸入模式。
+
+    放在畫面上緣 (y=0) 而非底部 — 底部會擠到戰鬥的 HP/MERCY HUD 與行動鈕。
+    寬度只佔左半邊,留出右上角給相機預覽框 (PREVIEW_WIDTH + margin) 不被覆蓋。
+    """
     if not msg:
         return
-    h = 34
-    banner_y = config.SCREEN_HEIGHT - h - 50
+    h = 24
+    banner_y = 0
+    banner_w = (config.SCREEN_WIDTH
+                - config.PREVIEW_WIDTH - 2 * config.PREVIEW_MARGIN)
     pygame.draw.rect(surf, (60, 0, 0),
-                     (0, banner_y, config.SCREEN_WIDTH, h))
+                     (0, banner_y, banner_w, h))
     pygame.draw.line(surf, config.RED,
-                     (0, banner_y), (config.SCREEN_WIDTH, banner_y), 2)
+                     (0, banner_y + h), (banner_w, banner_y + h), 2)
     pygame.draw.line(surf, config.RED,
-                     (0, banner_y + h), (config.SCREEN_WIDTH, banner_y + h), 2)
+                     (banner_w, banner_y), (banner_w, banner_y + h), 2)
     text = (f"⚠ {msg}    ←↑↓→ 游標 / ENTER 確認 / SPACE 跳"
             "  (1 2 3 選關 / R 重玩)")
     ts = font.render(text, True, (255, 220, 220))
     surf.blit(ts, ts.get_rect(
-        center=(config.SCREEN_WIDTH // 2, banner_y + h // 2)))
+        center=(banner_w // 2, banner_y + h // 2)))
 
 
 def clamp(v, lo, hi):
