@@ -3,7 +3,8 @@
 提供:
 - ``Rect``:幾何盒子 (碰撞 / 對齊),API 仿 pygame.Rect 子集。
 - ``Canvas``:把所有「畫到畫面」的動作包成 numpy BGR 陣列上的 cv2 操作,
-  並用 Pillow 解 CJK 文字 (cv2.putText 不支援中文)。
+  CJK 文字直接用 OpenCV 5 的 ``cv2.FontFace`` + ``cv2.putText`` 新 API 畫
+  (需要 ``opencv-python-rolling`` 5.x;舊版 ``opencv-python`` 不支援)。
 - ``measure_text`` / ``fit_font_size``:量字寬,讓中文不會超出框 (auto-shrink-to-fit)。
 
 設計重點:
@@ -20,7 +21,6 @@ from functools import lru_cache
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
 
 
 # ----------------------------------------------------------------------
@@ -187,25 +187,44 @@ def _find_font_path(bold):
     return None
 
 
-@lru_cache(maxsize=128)
-def get_font(size, bold=False):
-    """取得 PIL ImageFont (帶快取);找不到 CJK 字型時退回 PIL 內建。"""
+@lru_cache(maxsize=4)
+def _get_font_face(bold=False):
+    """載入並快取 cv2.FontFace (不含大小;大小是 putText / getTextSize 參數)。
+
+    找不到 CJK 字型回 None;呼叫端會退回 Hershey ASCII。
+    """
     path = _find_font_path(bold)
     if path is None:
-        return ImageFont.load_default()
+        return None
     try:
-        return ImageFont.truetype(path, max(6, int(size)))
-    except OSError:
-        return ImageFont.load_default()
+        return cv2.FontFace(path)
+    except (cv2.error, RuntimeError):
+        return None
+
+
+def _text_rect(text, size, bold):
+    """回傳 cv2.getTextSize 的緊密 bbox (x, y, w, h);找不到字型回 (0,0,0,0)。"""
+    ff = _get_font_face(bold)
+    if ff is None:
+        return (0, 0, 0, 0)
+    # 新 API: (imgsize, text, org, fface, size) -> (x, y, w, h)
+    return cv2.getTextSize((0, 0), text, (0, 0), ff, max(6, int(size)))
 
 
 def measure_text(text, size, bold=False):
-    """回傳 (width, height) — 用 PIL 量字。"""
+    """回傳 (width, height) — 直接用 cv2.getTextSize 量字。"""
     if not text:
         return 0, 0
-    font = get_font(size, bold)
-    bbox = font.getbbox(text)
-    return (bbox[2] - bbox[0], bbox[3] - bbox[1])
+    ff = _get_font_face(bold)
+    if ff is not None:
+        _x, _y, w, h = _text_rect(text, size, bold)
+        return (w, h)
+    # 退回 Hershey ASCII (沒有 CJK)
+    scale = max(0.3, int(size) / 30.0)
+    thickness = max(1, int(scale * 1.5))
+    (w, h), _baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX,
+                                        scale, thickness)
+    return (w, h)
 
 
 def fit_font_size(text, max_width, base_size, bold=False, min_size=10):
@@ -222,7 +241,8 @@ def fit_font_size(text, max_width, base_size, bold=False, min_size=10):
 
 
 # ----------------------------------------------------------------------
-# 文字渲染:渲染到一張 RGBA PIL Image,再轉成 (BGR ndarray, alpha mask)。
+# 文字渲染:用 cv2.FontFace + cv2.putText (OpenCV 5 新 API) 渲染到一張 BGR
+# 暫存影像,白色強度即為 alpha,再貼回主畫面做 alpha 混色。
 # 一次性算好,以 LRU 快取下次同字串直接複用。
 # ----------------------------------------------------------------------
 
@@ -240,34 +260,53 @@ def render_text(text, size, color_rgb, bold=False):
     if cached is not None:
         return cached
 
-    font = get_font(size, bold)
-    # 用 textbbox 量實際渲染框 (含偏移),確保畫布夠裝。
-    dummy = Image.new("RGBA", (1, 1))
-    d = ImageDraw.Draw(dummy)
-    try:
-        bbox = d.textbbox((0, 0), text, font=font)
-    except AttributeError:
-        # 老版 Pillow 沒 textbbox,退回 textsize
-        w, h = d.textsize(text, font=font)
-        bbox = (0, 0, w, h)
-    pad = 2
-    canvas_w = max(1, bbox[2] - bbox[0] + pad * 2)
-    canvas_h = max(1, bbox[3] - bbox[1] + pad * 2)
-    img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    # 畫在 (-bbox[0]+pad, -bbox[1]+pad),這樣 bbox 起點剛好落到 (pad, pad)
-    draw.text((-bbox[0] + pad, -bbox[1] + pad), text,
-              font=font, fill=color_rgb + (255,))
-
-    arr = np.asarray(img)              # H, W, 4 (RGBA)
-    rgb = arr[..., :3]
-    alpha = arr[..., 3:4].astype(np.float32) / 255.0
-    bgr = np.ascontiguousarray(rgb[..., ::-1])   # RGB → BGR
+    ff = _get_font_face(bold)
+    if ff is None:
+        result = _render_text_hershey(text, size, color_rgb)
+    else:
+        result = _render_text_freetype(text, size, color_rgb, ff)
 
     if len(_TEXT_CACHE) >= _TEXT_CACHE_MAX:
         # 簡易 FIFO:Python dict 保留插入順序,踢掉最舊的
         _TEXT_CACHE.pop(next(iter(_TEXT_CACHE)))
-    _TEXT_CACHE[key] = (bgr, alpha)
+    _TEXT_CACHE[key] = result
+    return result
+
+
+def _render_text_freetype(text, size, color_rgb, ff):
+    """用 cv2.FontFace 把白色字渲染到黑底,白強度當 alpha,再上色。"""
+    s = max(6, int(size))
+    rx, ry, rw, rh = cv2.getTextSize((0, 0), text, (0, 0), ff, s)
+    pad = 2
+    canvas_w = max(1, rw + pad * 2)
+    canvas_h = max(1, rh + pad * 2)
+    # 預設 origin 是 baseline。bbox 是 (rx, ry, rw, rh) — 把 bbox 左上推到 (pad, pad)
+    # 等於把 baseline 從 (0,0) 平移 (pad-rx, pad-ry)。
+    tmp = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+    cv2.putText(tmp, text, (pad - rx, pad - ry), (255, 255, 255), ff, s)
+    # 白色 (255,255,255) AA 出來 B=G=R,任一通道就是 alpha
+    alpha = (tmp[..., 0:1].astype(np.float32) / 255.0)
+    bgr = np.empty((canvas_h, canvas_w, 3), dtype=np.uint8)
+    bgr[:] = (color_rgb[2], color_rgb[1], color_rgb[0])  # RGB → BGR
+    return bgr, alpha
+
+
+def _render_text_hershey(text, size, color_rgb):
+    """退回方案:沒有 CJK 字型時用 OpenCV 內建 Hershey (只有 ASCII)。"""
+    s = max(6, int(size))
+    scale = max(0.3, s / 30.0)
+    thickness = max(1, int(scale * 1.5))
+    (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX,
+                                         scale, thickness)
+    pad = 2
+    canvas_w = max(1, tw + pad * 2)
+    canvas_h = max(1, th + baseline + pad * 2)
+    tmp = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+    cv2.putText(tmp, text, (pad, pad + th), cv2.FONT_HERSHEY_SIMPLEX,
+                scale, (255, 255, 255), thickness, cv2.LINE_AA)
+    alpha = (tmp[..., 0:1].astype(np.float32) / 255.0)
+    bgr = np.empty((canvas_h, canvas_w, 3), dtype=np.uint8)
+    bgr[:] = (color_rgb[2], color_rgb[1], color_rgb[0])
     return bgr, alpha
 
 
