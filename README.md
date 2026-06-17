@@ -326,3 +326,11 @@ A: 目前對話會自動播完，沒有快轉鍵。要快可把 `game.py` 的 `c
 - **判定框**：玩家心碰撞框為視覺 sprite 的 **1.2 倍**（傷害判定較寬鬆 → 容易被打到，可在 `utils.heart_rect` 改回 0.9 變更嚴格）
 - **音效合成**：無 .wav 檔時用 `numpy` 生成 sine/square wave + 指數衰減包絡，再透過 `pygame.sndarray.make_sound` 變成 `Sound`
 - **全螢幕**：`pygame.FULLSCREEN | pygame.SCALED`，內部仍是 960×720，pygame 自動 letterbox 縮放
+
+## BGM 參考
+- level1: https://www.youtube.com/watch?v=xhklZR11iaE&list=RDxhklZR11iaE&start_radio=1
+- level2: https://www.youtube.com/watch?v=g6aia0GQMRw&list=RDg6aia0GQMRw&start_radio=1
+- level3: https://www.youtube.com/watch?v=PpDvm1X6zG0&list=RDPpDvm1X6zG0&start_radio=1
+
+## gif 參考
+https://undertale.fandom.com/zh/wiki/Undyne

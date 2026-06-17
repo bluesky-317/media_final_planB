@@ -14,10 +14,13 @@ class LevelMenu:
     BTN_H = 160
     BTN_GAP = 30
 
-    def __init__(self, font_big, font_mid, font_small):
+    def __init__(self, font_big, font_mid, font_small,
+                 font_btn=None, font_tiny=None):
         self.font_big = font_big
         self.font_mid = font_mid
         self.font_small = font_small
+        self.font_btn = font_btn or font_mid
+        self.font_tiny = font_tiny or font_small
 
         total_w = self.BTN_W * 3 + self.BTN_GAP * 2
         start_x = (config.SCREEN_WIDTH - total_w) // 2
@@ -112,10 +115,10 @@ class LevelMenu:
         pygame.draw.circle(surf, config.WHITE, self.cursor, 22, 1)
 
         # 無鏡頭橫幅 (若有)
-        draw_no_camera_banner(surf, self.font_small, camera_error)
+        draw_no_camera_banner(surf, self.font_tiny, camera_error)
 
         # 底部說明
-        draw_text_center(surf, self.font_small,
+        draw_text_center(surf, self.font_tiny,
                          "ESC 結束 / 沒有偵測到手請靠近鏡頭並抬起『右手食指』",
                          config.SCREEN_WIDTH // 2,
-                         config.SCREEN_HEIGHT - 30, config.GREY)
+                         config.SCREEN_HEIGHT - 22, config.GREY)

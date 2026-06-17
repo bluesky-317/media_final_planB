@@ -67,8 +67,11 @@ GESTURE_DEBOUNCE_S = 0.15
 FINGER_EXTEND_MARGIN = 0.015  # 指尖 y 比 PIP y 小多少才算伸直
 
 # 藍心物理
+# 設計目標:JUMP_VELOCITY 必須讓玩家能跨過 Sans BLUE 階段的最高骨牆,
+# 牆高由 bullets.SansPattern._safe_wall_heights() 依這兩個常數動態算出,
+# 改 JUMP_VELOCITY 或 GRAVITY 時牆高會自動跟著縮放,不需要手動配對。
 GRAVITY = 1400.0  # px / s^2
-JUMP_VELOCITY = 470.0  # 跳躍初速 (向上為負)
+JUMP_VELOCITY = 540.0  # 跳躍初速 (向上為負);max 跳高 ≈ V²/(2g) = 104 px
 JUMP_VY_THRESHOLD = -0.7  # 食指速度小於此值 (向上) 觸發跳躍
 JUMP_COOLDOWN = 0.25
 
@@ -83,49 +86,55 @@ SHIELD_BLOCK_DIST = 64  # 子彈距離心 ≤ 此值且角度命中 → 被擋
 TURN_HOVER_SECONDS = 1.0   # 戰鬥內按鈕懸停確認時間 (比主選單快)
 
 # 關卡資訊
-# id        = 顯示用編號 (按鈕上 1/2/3)
-# pattern_id = 對應 bullets.make_pattern 的彈幕模式 (1=Froggit, 2=Napstablook, 3=Sans)
-# 第 1、2 關內容已對調
+# id         = 顯示用編號 (按鈕上 1/2/3)
+# pattern_id = 對應 bullets.make_pattern (1=Undyne, 2=Froggit, 3=Sans)
+# sprite     = assets/images/enemies/ 下的 GIF 檔名;載不到則隱藏圖片
 LEVELS = [
     {
         "id": 1,
-        "pattern_id": 2,
-        "name": "Level 1 - Napstablook",
-        "subtitle": "波形眼淚 / 中等難度",
+        "pattern_id": 1,
+        "name": "Level 1 - Undyne",
+        "subtitle": "矛雨 / 強制綠心格擋 / 中等難度",
         "color": BLUE,
         "hp": 100,
-        # 戰鬥資料
-        "enemy_name": "NAPSTABLOOK",
-        "enemy_hp": 25,
-        "turn_duration": 7,
-        "mercy_threshold": 2,
+        "enemy_name": "UNDYNE",
+        "enemy_hp": 60,
+        "turn_duration": 9,
+        "mercy_threshold": 3,
+        "sprite": "Undyne.gif",
         "intro": [
-            "前方擋著一隻看起來很憂鬱的幽靈。",
-            "牠似乎不太想理你。",
+            "Undyne 重重落地擋在你面前。",
+            "「人類!你打算溜進皇家領地嗎?」",
+            "她舉起一支發光的長矛。",
         ],
         "acts": [
             {"label": "Check",
-             "lines": ["NAPSTABLOOK  ATK 10  DEF 10",
-                       "鄰居家的幽靈,習慣自我隱形。"],
+             "lines": ["UNDYNE  ATK 18  DEF 12",
+                       "皇家守衛隊長,熱血滿點。"],
              "mercy": 0},
-            {"label": "Cheer",
-             "lines": ["你輕聲鼓勵了 Napstablook。",
-                       "牠似乎稍微振作了一點。"],
+            {"label": "Plead",
+             "lines": ["你開口求她放你過。",
+                       "「呃啊啊啊—這只會讓我更興奮!」"],
              "mercy": 1},
-            {"label": "Flirt",
-             "lines": ["你向 Napstablook 表達了好感。",
-                       "牠害羞地飄到天花板上。"],
+            {"label": "Cheer",
+             "lines": ["「不愧是隊長!架式好帥!」",
+                       "她愣了半秒,然後咧嘴一笑。"],
+             "mercy": 1},
+            {"label": "Challenge",
+             "lines": ["你擺出戰鬥架式回應她。",
+                       "「呵—你還算有點骨氣!」"],
              "mercy": 1},
         ],
-        "fight_lines": ["你揮拳。", "命中。"],
-        "kill_lines":  ["Napstablook 默默地消失了。"],
-        "spare_lines": ["你選擇饒恕 Napstablook。",
-                        "牠帶著一絲笑意離開了。"],
-        "spare_not_ready_lines": ["對方還沒打算離開。"],
+        "fight_lines": ["你揮拳!", "Undyne 的盔甲叮了一聲。"],
+        "kill_lines":  ["Undyne 單膝跪地。",
+                        "「...好戰士。下次,我會贏。」"],
+        "spare_lines": ["你選擇饒恕 Undyne。",
+                        "「...哼。算你今天運氣好。」"],
+        "spare_not_ready_lines": ["「想跑?還早得很!」"],
     },
     {
         "id": 2,
-        "pattern_id": 1,
+        "pattern_id": 2,
         "name": "Level 2 - Froggit",
         "subtitle": "簡單彈幕 / 蒼蠅",
         "color": GREEN,
@@ -134,6 +143,7 @@ LEVELS = [
         "enemy_hp": 30,
         "turn_duration": 6,
         "mercy_threshold": 2,
+        "sprite": "Froggit.gif",
         "intro": [
             "一隻 Froggit 從草叢裡跳了出來。",
             "牠歪著頭看著你。",
@@ -162,17 +172,18 @@ LEVELS = [
         "id": 3,
         "pattern_id": 3,
         "name": "Level 3 - Sans",
-        "subtitle": "骨頭 + 雷射 / 困難",
+        "subtitle": "骨頭 + 雷射 + 強制藍心 / 困難",
         "color": RED,
         "hp": 100,
         "enemy_name": "SANS",
         "enemy_hp": 40,
-        "turn_duration": 10,
-        "mercy_threshold": 99,   # 無法用 ACT 饒恕,只能 FIGHT
+        "turn_duration": 12,
+        "mercy_threshold": 99,
+        "sprite": "Sans.gif",
         "intro": [
             "Sans 把手插在口袋裡。",
             "「想聽個笑話嗎?」",
-            "...你感覺這場仗不會輕鬆結束。",
+            "「...其實,你的靈魂該變藍了。」",
         ],
         "acts": [
             {"label": "Check",

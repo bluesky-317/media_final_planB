@@ -20,7 +20,8 @@ import config
 import bullets as bullets_mod
 from utils import (clamp, draw_heart, heart_rect, draw_text_center,
                    draw_camera_preview, draw_shield_bar, shield_blocks,
-                   draw_mode_indicator, draw_no_camera_banner, DialogBox)
+                   draw_mode_indicator, draw_no_camera_banner, DialogBox,
+                   load_enemy_sprite)
 
 try:
     import audio
@@ -45,17 +46,20 @@ class BattleScene:
     PHASE_ACT_MENU = "ACT_MENU"
     PHASE_ENEMY = "ENEMY"
 
-    def __init__(self, level, font_big, font_mid, font_small):
+    def __init__(self, level, font_big, font_mid, font_small,
+                 font_btn=None, font_tiny=None):
         self.level = level
         self.font_big = font_big
         self.font_mid = font_mid
         self.font_small = font_small
+        self.font_btn = font_btn or font_mid
+        self.font_tiny = font_tiny or font_small
 
         # 玩家
         self.hp = level["hp"]
         self.hp_max = level["hp"]
-        self.items = 2
-        self.heal_amount = 30
+        self.items = 3
+        self.heal_amount = 10
 
         # 敵人
         self.enemy_name = level["enemy_name"]
@@ -101,6 +105,9 @@ class BattleScene:
         self.jump_cooldown = 0.0
         self.shield_angle = 0.0
         self.invuln = 0
+
+        # 怪物 GIF sprite (cv2 載入,在 DIALOG/PLAYER/ACT_MENU 顯示)
+        self.sprite = load_enemy_sprite(level.get("sprite"))
 
         self.result = None
 
@@ -172,6 +179,8 @@ class BattleScene:
         if self.mode_flash_t > 0: self.mode_flash_t -= dt
         if self.blocked_flash_t > 0: self.blocked_flash_t -= dt
         if self.red_flash_t > 0: self.red_flash_t -= dt
+        if self.sprite is not None:
+            self.sprite.update(dt)
         for d in self.damage_numbers:
             d["t"] += dt
             d["y"] += d["vy"] * dt
@@ -325,7 +334,9 @@ class BattleScene:
 
     # ------------------------------------------------------------------
     def _update_enemy_turn(self, dt, finger_norm, tracker):
-        self._enter_mode(tracker.gesture)
+        # 靈魂模式完全由 pattern 控制 (UndynePattern 強制 GREEN, SansPattern 強制 BLUE)
+        if self.pattern is not None and getattr(self.pattern, "forced_mode", None):
+            self._enter_mode(self.pattern.forced_mode)
         self.shield_angle = tracker.angle
 
         box_rect = (config.BOX_LEFT, config.BOX_TOP,
@@ -439,6 +450,10 @@ class BattleScene:
                          (ebx, eby, int(ebw * eratio), ebh))
         pygame.draw.rect(surf, config.WHITE, (ebx, eby, ebw, ebh), 1)
 
+        # 怪物 sprite (所有階段都顯示;ENEMY 攻擊時也要看得到誰在打你)
+        if self.sprite is not None:
+            self.sprite.draw(surf, config.SCREEN_WIDTH // 2, 200)
+
         # 中央區塊
         if self.phase == self.PHASE_DIALOG:
             # 對話框替代戰鬥框
@@ -465,6 +480,11 @@ class BattleScene:
                                      2)
                 prev_clip = surf.get_clip()
                 surf.set_clip(box)
+                # Undyne 綠心預警:每個即將射來的方向畫一個閃爍三角
+                if (self.pattern is not None
+                        and hasattr(self.pattern, "telegraph_sides")):
+                    for side, ratio in self.pattern.telegraph_sides():
+                        self._draw_telegraph_arrow(surf, side, ratio, shake)
                 for b in self.bullets:
                     b.draw(surf)
                 if self.soul_mode == config.SOUL_GREEN:
@@ -534,14 +554,44 @@ class BattleScene:
             pygame.draw.circle(surf, config.WHITE, self.cursor, 22, 1)
 
         # 提示
-        draw_text_center(surf, self.font_small, self._phase_hint(),
+        draw_text_center(surf, self.font_tiny, self._phase_hint(),
                          config.SCREEN_WIDTH // 2,
-                         config.SCREEN_HEIGHT - 14, config.GREY)
+                         config.SCREEN_HEIGHT - 12, config.GREY)
 
         # 攝影機 + 無鏡頭橫幅
         draw_camera_preview(surf, camera_frame,
                             font=self.font_small, error_msg=camera_error)
-        draw_no_camera_banner(surf, self.font_small, camera_error)
+        draw_no_camera_banner(surf, self.font_tiny, camera_error)
+
+    def _draw_telegraph_arrow(self, surf, side, ratio, shake):
+        """綠心階段四向預警:ratio 1=還久(暗) ~ 0=快來(亮紅)。"""
+        cx = config.BOX_CENTER_X + shake[0]
+        cy = config.BOX_CENTER_Y + shake[1]
+        offset = 110
+        intensity = 1.0 - ratio
+        col = (
+            int(120 + 135 * intensity),
+            int(30 + 20 * (1 - intensity)),
+            int(30 + 20 * (1 - intensity)),
+        )
+        if side == 'top':
+            tip = (cx, cy - offset)
+            base1 = (cx - 14, cy - offset - 18)
+            base2 = (cx + 14, cy - offset - 18)
+        elif side == 'bottom':
+            tip = (cx, cy + offset)
+            base1 = (cx - 14, cy + offset + 18)
+            base2 = (cx + 14, cy + offset + 18)
+        elif side == 'left':
+            tip = (cx - offset, cy)
+            base1 = (cx - offset - 18, cy - 14)
+            base2 = (cx - offset - 18, cy + 14)
+        else:
+            tip = (cx + offset, cy)
+            base1 = (cx + offset + 18, cy - 14)
+            base2 = (cx + offset + 18, cy + 14)
+        pygame.draw.polygon(surf, col, [tip, base1, base2])
+        pygame.draw.polygon(surf, config.WHITE, [tip, base1, base2], 2)
 
     # ------------------------------------------------------------------
     def _draw_buttons(self, surf, buttons):
@@ -552,7 +602,7 @@ class BattleScene:
             bg = tuple(min(255, int(c * (0.18 + 0.55 * hr))) for c in color)
             pygame.draw.rect(surf, bg, r)
             pygame.draw.rect(surf, color, r, 3)
-            ts = self.font_mid.render(b["label"], False, config.WHITE)
+            ts = self.font_btn.render(b["label"], False, config.WHITE)
             surf.blit(ts, ts.get_rect(center=r.center))
             if hr > 0:
                 pygame.draw.rect(surf, config.WHITE,
@@ -594,10 +644,10 @@ class BattleScene:
             return "選擇行動,或 BACK 返回"
         if self.phase == self.PHASE_ENEMY:
             if self.soul_mode == config.SOUL_RED:
-                return "紅心:自由移動 / ✌ 切藍心 / 🖐 切綠心"
+                return "紅心:自由移動 (食指控制)"
             if self.soul_mode == config.SOUL_BLUE:
-                return "藍心:上揮跳!  X 軸跟食指"
-            return "綠心:心固定 / 盾隨食指方向"
+                return "藍心:重力下墜 / 手往上揮 = 跳"
+            return "綠心:心固定 / 盾隨食指方向 (上下左右)"
         return ""
 
 
@@ -607,12 +657,15 @@ class ResultScene:
     BTN_W = 280
     BTN_H = 80
 
-    def __init__(self, result, level, font_big, font_mid, font_small):
+    def __init__(self, result, level, font_big, font_mid, font_small,
+                 font_btn=None, font_tiny=None):
         self.result = result
         self.level = level
         self.font_big = font_big
         self.font_mid = font_mid
         self.font_small = font_small
+        self.font_btn = font_btn or font_mid
+        self.font_tiny = font_tiny or font_small
 
         cx = config.SCREEN_WIDTH // 2
         cy = config.SCREEN_HEIGHT - 160
@@ -653,7 +706,7 @@ class ResultScene:
         bg = tuple(min(255, int(c * (0.25 + 0.65 * ratio))) for c in base_color)
         pygame.draw.rect(surf, bg, rect, border_radius=10)
         pygame.draw.rect(surf, base_color, rect, 3, border_radius=10)
-        draw_text_center(surf, self.font_mid, label,
+        draw_text_center(surf, self.font_btn, label,
                          rect.centerx, rect.centery - 6, config.WHITE)
         pygame.draw.rect(surf, config.DARK_GREY,
                          (rect.left + 14, rect.bottom - 14,
@@ -688,4 +741,4 @@ class ResultScene:
         draw_heart(surf, self.cursor[0], self.cursor[1], size=14)
         pygame.draw.circle(surf, config.WHITE, self.cursor, 22, 1)
 
-        draw_no_camera_banner(surf, self.font_small, camera_error)
+        draw_no_camera_banner(surf, self.font_tiny, camera_error)

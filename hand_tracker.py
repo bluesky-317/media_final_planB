@@ -91,6 +91,11 @@ class HandTracker:
             self.error_msg = _MEDIAPIPE_ERROR
             return
 
+        # 顯式停用攝影機 (例如 main.py 用 --keyboard 強制鍵盤模式)
+        if cam_index is None:
+            self.error_msg = "鍵盤模式 (--keyboard)"
+            return
+
         # 2) 嘗試開啟攝影機
         try:
             cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)

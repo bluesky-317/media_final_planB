@@ -1,11 +1,91 @@
 """共用的繪圖輔助函式。"""
 import math
+import os
 
 import cv2
 import numpy as np
 import pygame
 
 import config
+
+
+# ----------------------------------------------------------------------
+# 怪物 GIF 動畫 (用 cv2.VideoCapture 抽幀 -> pygame Surface)
+# ----------------------------------------------------------------------
+
+_SPRITE_CACHE = {}
+
+
+class EnemySprite:
+    """循環播放的怪物 sprite。frames 為 pygame.Surface list。"""
+
+    def __init__(self, frames, fps=6):
+        self.frames = frames
+        self.fps = fps
+        self.t = 0.0
+
+    def update(self, dt):
+        self.t += dt
+
+    def draw(self, surf, cx, cy, bob_amp=3.0):
+        if not self.frames:
+            return
+        idx = int(self.t * self.fps) % len(self.frames)
+        frame = self.frames[idx]
+        # Undertale 風漂浮動效:整體上下輕微擺動
+        oy = math.sin(self.t * 2.0) * bob_amp
+        rect = frame.get_rect(center=(int(cx), int(cy + oy)))
+        surf.blit(frame, rect)
+
+
+def load_enemy_sprite(filename, target_height=140):
+    """從 assets/images/enemies/<filename> 載入 GIF。
+
+    用 cv2.VideoCapture 抽出每一幀,再轉成 pygame Surface。
+    結果會快取,反覆呼叫同檔名只解碼一次。檔不存在/讀取失敗回 None。
+    """
+    if not filename:
+        return None
+    cache_key = (filename, target_height)
+    if cache_key in _SPRITE_CACHE:
+        return _SPRITE_CACHE[cache_key]
+
+    path = os.path.join("assets", "images", "enemies", filename)
+    if not os.path.exists(path):
+        print(f"[警告] 找不到怪物圖檔: {path}")
+        _SPRITE_CACHE[cache_key] = None
+        return None
+
+    cap = cv2.VideoCapture(path)
+    frames = []
+    while True:
+        ok, frame_bgr = cap.read()
+        if not ok or frame_bgr is None:
+            break
+        h, w = frame_bgr.shape[:2]
+        scale = target_height / max(1, h)
+        new_w = max(1, int(w * scale))
+        # 像素風保留:INTER_NEAREST
+        resized = cv2.resize(frame_bgr, (new_w, target_height),
+                             interpolation=cv2.INTER_NEAREST)
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        # pygame.surfarray 要 (W,H,3)
+        rgb_t = np.ascontiguousarray(rgb.transpose(1, 0, 2))
+        surf = pygame.surfarray.make_surface(rgb_t).convert()
+        # GIF 透明背景在 cv2 載入後變黑;對黑色背景的戰鬥畫面剛好相容,
+        # 同時用 colorkey 讓陰影外部的黑色不會擋住其他東西。
+        surf.set_colorkey((0, 0, 0))
+        frames.append(surf)
+    cap.release()
+
+    if not frames:
+        print(f"[警告] 怪物 GIF 沒抽到任何幀: {path}")
+        _SPRITE_CACHE[cache_key] = None
+        return None
+
+    sprite = EnemySprite(frames)
+    _SPRITE_CACHE[cache_key] = sprite
+    return sprite
 
 
 def draw_text_center(surf, font, text, cx, cy, color):
@@ -103,7 +183,8 @@ def draw_no_camera_banner(surf, font, msg):
                      (0, banner_y), (config.SCREEN_WIDTH, banner_y), 2)
     pygame.draw.line(surf, config.RED,
                      (0, banner_y + h), (config.SCREEN_WIDTH, banner_y + h), 2)
-    text = f"⚠  {msg}    無輸入模式：鍵盤 1/2/3 選關、R 重玩、ENTER 回選單"
+    text = (f"⚠ {msg}    ←↑↓→ 游標 / ENTER 確認 / SPACE 跳"
+            "  (1 2 3 選關 / R 重玩)")
     ts = font.render(text, True, (255, 220, 220))
     surf.blit(ts, ts.get_rect(
         center=(config.SCREEN_WIDTH // 2, banner_y + h // 2)))
