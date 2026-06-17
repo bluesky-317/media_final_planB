@@ -1,23 +1,21 @@
-"""遊戲畫面後製特效 (OpenCV)。
+"""遊戲畫面後製特效 (純 OpenCV)。
 
-每幀把 pygame Surface → numpy → cv2 處理 → 回貼新 Surface。
-所有效果都用計時器觸發；當沒有任何效果活躍時 ``apply`` 直接 bypass，
-不付 cv2 round-trip 成本。
+直接吃 / 吐 BGR ndarray;不再經過 pygame Surface round-trip。
+所有效果都用計時器觸發;沒有效果活躍時 ``apply`` 直接 bypass,不付 cv2 成本。
 
-效果一覽：
-    damage_flash     受傷紅色 + Gaussian 模糊 (重傷時加馬賽克 ``cv2.blur``)
-    sans_wave        Level 3 敵人回合持續 sin 波 ``cv2.remap`` 位移
-    glitch_burst     色差錯位 (split/warpAffine/merge) + Laplacian 鬼影
-    pixelate         場景轉場 ``cv2.resize`` 像素化
-    victory_shockwave 勝利瞬間 ``cv2.warpPolar`` 環狀錯動
-    defeat_edges     GAME OVER 持續 Sobel 邊緣強化 + 冷藍色調
+效果一覽:
+    damage_flash      受傷紅色 + Gaussian 模糊 (重傷時加 cv2.blur 馬賽克)
+    sans_wave         Sans 階段 sin 波 cv2.remap
+    glitch_burst      色差 split/warpAffine/merge + Laplacian 鬼影
+    pixelate          進關 / 結算的 cv2.resize 像素化
+    victory_shockwave 勝利瞬間 cv2.warpPolar 環狀錯動
+    defeat_edges      GAME OVER 持續 Sobel 邊緣強化 + 冷藍色調
 """
 import math
 import random
 
 import cv2
 import numpy as np
-import pygame
 
 import config
 
@@ -31,27 +29,21 @@ _GLITCH_DUR = 0.08
 class PostFX:
     def __init__(self):
         self.t = 0.0
-
         self.damage_t = 0.0
         self.heavy_damage = False
-
         self.victory_t = 0.0
         self.defeat_active = False
-
         self.transition_t = 0.0
-
         self.sans_wave_active = False
         self.glitch_t = 0.0
         self._next_glitch_t = 0.0
 
-        # sin 波 remap 的基底網格 (預先建好,每幀只算位移)
         h, w = config.SCREEN_HEIGHT, config.SCREEN_WIDTH
         xs = np.arange(w, dtype=np.float32)
         ys = np.arange(h, dtype=np.float32)
         self._map_x_base, self._map_y_base = np.meshgrid(xs, ys)
 
     # ------------------------------------------------------------------
-    # 觸發 / 設定
     def trigger_damage(self, severe=False):
         self.damage_t = _DAMAGE_DUR
         self.heavy_damage = severe
@@ -71,7 +63,6 @@ class PostFX:
     def set_sans_wave(self, on):
         on = bool(on)
         if on and not self.sans_wave_active:
-            # 剛開始 Sans 回合 → 馬上一發 glitch 當開場
             self.glitch_t = _GLITCH_DUR
             self._next_glitch_t = self.t + random.uniform(2.0, 4.0)
         self.sans_wave_active = on
@@ -87,7 +78,6 @@ class PostFX:
             self.transition_t = max(0.0, self.transition_t - dt)
         if self.glitch_t > 0:
             self.glitch_t = max(0.0, self.glitch_t - dt)
-        # Sans 回合的隨機 glitch
         if self.sans_wave_active and self.t >= self._next_glitch_t:
             self.trigger_glitch()
             self._next_glitch_t = self.t + random.uniform(2.5, 5.0)
@@ -101,16 +91,12 @@ class PostFX:
                 or self.glitch_t > 0)
 
     # ------------------------------------------------------------------
-    def apply(self, surface):
-        """無效果時直接回傳原 surface;有效果時回傳處理後的新 surface。"""
+    def apply(self, bgr):
+        """無效果時直接回傳同一張影像;有效果時逐層套用後回傳新的 BGR 陣列。"""
         if not self._has_active():
-            return surface
+            return bgr
 
-        # pygame surfarray 是 (W,H,3) RGB; cv2 要 (H,W,3) BGR
-        arr = pygame.surfarray.array3d(surface)
-        img = np.ascontiguousarray(arr.transpose(1, 0, 2))
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-
+        img = bgr  # 已經是 BGR ndarray
         if self.sans_wave_active:
             img = self._fx_sans_wave(img)
         if self.damage_t > 0:
@@ -123,18 +109,14 @@ class PostFX:
             img = self._fx_victory(img)
         if self.transition_t > 0:
             img = self._fx_pixelate(img)
-
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        out = np.ascontiguousarray(img.transpose(1, 0, 2))
-        return pygame.surfarray.make_surface(out)
+        return img
 
     # ------------------------------------------------------------------
-    # 各效果
     def _fx_damage(self, img):
-        s = self.damage_t / _DAMAGE_DUR   # 1 -> 0
+        s = self.damage_t / _DAMAGE_DUR
         blurred = cv2.GaussianBlur(img, (0, 0), 3.5 * s + 0.1)
         red = np.zeros_like(img)
-        red[:, :, 2] = 255                # BGR red
+        red[:, :, 2] = 255
         out = cv2.addWeighted(blurred, 1.0 - 0.30 * s, red, 0.30 * s, 0.0)
         if self.heavy_damage:
             block = max(3, int(14 * s))
@@ -156,7 +138,6 @@ class PostFX:
     def _fx_glitch(self, img):
         h, w = img.shape[:2]
         b, g, r = cv2.split(img)
-        # 用 warpAffine 平移 R / B 通道
         shift_r = random.randint(-14, 14)
         shift_b = random.randint(-14, 14)
         M_r = np.float32([[1, 0, shift_r], [0, 1, random.randint(-2, 2)]])
@@ -164,7 +145,6 @@ class PostFX:
         r = cv2.warpAffine(r, M_r, (w, h), borderMode=cv2.BORDER_REPLICATE)
         b = cv2.warpAffine(b, M_b, (w, h), borderMode=cv2.BORDER_REPLICATE)
         out = cv2.merge([b, g, r])
-        # Laplacian 邊緣 ghost
         lap = cv2.Laplacian(img, cv2.CV_8U, ksize=3)
         out = cv2.addWeighted(out, 0.85, lap, 0.35, 0.0)
         return out
@@ -175,7 +155,6 @@ class PostFX:
         sy = cv2.Sobel(gray, cv2.CV_16S, 0, 1, ksize=3)
         edges = cv2.convertScaleAbs(cv2.add(sx, sy))
         edges_bgr = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-        # 冷藍化:灰階分通道再強化藍 / 削弱紅 (saturated add/subtract)
         cold = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
         cb, cg, cr = cv2.split(cold)
         cb = cv2.add(cb, 45)
@@ -184,7 +163,7 @@ class PostFX:
         return cv2.addWeighted(cold, 0.80, edges_bgr, 0.55, 0.0)
 
     def _fx_victory(self, img):
-        s = self.victory_t / _VICTORY_DUR    # 1 -> 0
+        s = self.victory_t / _VICTORY_DUR
         if s < 0.05:
             return img
         h, w = img.shape[:2]
@@ -192,7 +171,6 @@ class PostFX:
         radius = math.hypot(cx, cy)
         polar = cv2.warpPolar(img, (w, h), (cx, cy), radius,
                               cv2.INTER_LINEAR + cv2.WARP_FILL_OUTLIERS)
-        # 在極座標圖上做環狀錯動 (橫向平移 = 角度旋轉)
         offset = int(24 * s)
         M = np.float32([[1, 0, offset], [0, 1, 0]])
         polar = cv2.warpAffine(polar, M, (w, h), borderMode=cv2.BORDER_WRAP)
@@ -201,8 +179,7 @@ class PostFX:
         return cv2.addWeighted(img, 1.0 - 0.55 * s, unpolar, 0.55 * s, 0.0)
 
     def _fx_pixelate(self, img):
-        ratio = self.transition_t / _TRANSITION_DUR   # 1 -> 0
-        # 強度在中段達到峰值 (頭尾平滑進出)
+        ratio = self.transition_t / _TRANSITION_DUR
         peak = 1.0 - abs(ratio - 0.5) * 2.0
         if peak <= 0.02:
             return img

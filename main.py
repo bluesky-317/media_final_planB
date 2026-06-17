@@ -1,21 +1,26 @@
-"""HandTale 主程式。
+"""HandTale 主程式 (OpenCV 純畫面 + 純鍵盤事件版本)。
 
-狀態機：MENU → BATTLE → RESULT → MENU。
+狀態機:MENU → BATTLE → RESULT → MENU。
 ESC 隨時可以結束 / 回主選單。
 
-無鏡頭 / 無 MediaPipe 時不會 crash，會顯示警告並啟動「無輸入模式」。
+無鏡頭 / 無 MediaPipe 時不會 crash,會顯示警告並啟動「無輸入模式」。
 此時可用鍵盤 1/2/3 選關、R 重玩、ENTER 回選單。
 """
 import argparse
 import math
+import sys
+import time
 
-import pygame
+import cv2
 
 import config
 from hand_tracker import HandTracker
 from menu import LevelMenu
 from game import BattleScene, ResultScene
 from post_fx import PostFX
+from canvas import Canvas
+from utils import Font
+import win_input
 
 
 def parse_args():
@@ -24,8 +29,9 @@ def parse_args():
         description="手勢操控的 Undertale 風戰鬥小遊戲")
     p.add_argument(
         "-k", "--keyboard", action="store_true",
-        help="強制鍵盤模式 (不啟動攝影機;用方向鍵 / Z X C / SPACE / ENTER 操作)")
+        help="強制鍵盤模式 (不啟動攝影機;用方向鍵 / SPACE / ENTER 操作)")
     return p.parse_args()
+
 
 try:
     import audio
@@ -36,68 +42,62 @@ except Exception as e:
 
 
 def get_fonts():
-    """嘗試使用支援中文的字型，找不到則回退到預設字型。"""
-    candidates = [
-        "Microsoft JhengHei",      # 正體中文 (Windows)
-        "Microsoft YaHei",         # 簡體中文 (Windows)
-        "Noto Sans CJK TC",
-        "PingFang TC",
-        "Arial Unicode MS",
-    ]
-    name = None
-    for c in candidates:
-        if c in pygame.font.get_fonts() or pygame.font.match_font(c):
-            name = c
-            break
+    """big / mid / small / btn / tiny 五個字級。"""
+    return (Font(64, True), Font(30, True), Font(20),
+            Font(22, True), Font(15))
 
-    def F(size, bold=False):
-        if name:
-            return pygame.font.SysFont(name, size, bold=bold)
-        return pygame.font.Font(None, size)
 
-    # big: 標題  mid: 副標 / 名稱  small: 一般文字 / HUD  btn: 按鈕  tiny: 底部提示
-    return F(64, True), F(30, True), F(20), F(22, True), F(15)
+# ----------------------------------------------------------------------
+# cv2.waitKey 的按鍵碼 (Windows + Linux/macOS 大致相同的部份)
+# ----------------------------------------------------------------------
+_KEY_ESC = 27
+_KEY_ENTER = (13, 10)
+_KEY_SPACE = 32
+_KEY_F1 = (7340032, 1114000, 8454144, 4128769)   # F1 在不同平台
+_KEYS_1 = (49,)
+_KEYS_2 = (50,)
+_KEYS_3 = (51,)
+_KEYS_R = (114, 82)
+
+
+def _is_key(key, code_or_codes):
+    if isinstance(code_or_codes, (tuple, list)):
+        return key in code_or_codes
+    return key == code_or_codes
 
 
 def main():
     args = parse_args()
 
-    # 必須在 pygame.init 之前 pre_init 才能低延遲播音訊
-    try:
-        pygame.mixer.pre_init(44100, -16, 2, 512)
-    except pygame.error:
-        pass
-    pygame.init()
-    pygame.display.set_caption(config.TITLE)
-    # 視窗鋪滿可視區但保留 HEADER (扣掉標題列 / 工作列大致需要的高度)。
-    # 不呼叫 SDL2 maximize,避免某些環境下 pygame screen surface 不同步造成黑屏。
-    info = pygame.display.Info()
-    init_w = min(info.current_w - 40, 1600)
-    init_h = min(info.current_h - 120, 1100)
-    screen = pygame.display.set_mode((init_w, init_h), pygame.RESIZABLE)
-
-    # 內部維持 960×720 邏輯解析度；所有場景畫到 game_surface，最後等比縮放貼回實際視窗
-    game_surface = pygame.Surface((config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
-    clock = pygame.time.Clock()
-
+    # 音訊 (唯一還用 pygame 的子系統)
     if _AUDIO:
         try:
             audio.init()
             audio.play_bgm("menu", volume=0.35)
         except Exception as e:
-            print(f"[警告] 音訊啟動失敗：{e}")
+            print(f"[警告] 音訊啟動失敗:{e}")
 
-    font_big, font_mid, font_small, font_btn, font_tiny = get_fonts()
+    fonts = get_fonts()
+    font_big, font_mid, font_small, font_btn, font_tiny = fonts
 
     tracker = HandTracker(None if args.keyboard else 0)
     camera_error = None
     if not tracker.opened():
         if args.keyboard:
             camera_error = "鍵盤模式 (--keyboard)"
-            print("[資訊] 已啟用鍵盤模式 (--keyboard)，不啟動攝影機。")
+            print("[資訊] 已啟用鍵盤模式 (--keyboard)。")
         else:
             camera_error = tracker.error_msg or "未偵測到攝影機"
-            print(f"[警告] {camera_error}。將以無輸入模式啟動，可用鍵盤 1/2/3 選關。")
+            print(f"[警告] {camera_error}。將以無輸入模式啟動。")
+
+    # OpenCV 視窗
+    cv2.namedWindow(config.TITLE, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+    cv2.resizeWindow(config.TITLE,
+                     min(1600, config.SCREEN_WIDTH * 2),
+                     min(1100, config.SCREEN_HEIGHT * 2))
+
+    # 邏輯解析度畫布 (960×720),所有東西都畫到這上面
+    canvas = Canvas(config.SCREEN_WIDTH, config.SCREEN_HEIGHT)
 
     state = "MENU"
     menu = LevelMenu(font_big, font_mid, font_small, font_btn, font_tiny)
@@ -105,20 +105,19 @@ def main():
     result_scene = None
     current_level = None
 
-    # OpenCV 後製特效;由 main 被動觀察 battle 狀態觸發,game.py 不需要任何改動
     fx = PostFX()
     prev_state = state
     prev_battle_id = None
     prev_hp = None
 
-    # 無攝影機鍵盤備援:用方向鍵推一個虛擬「食指」,Z/X/C 切靈魂,SPACE 跳,ENTER 確認
+    # 無攝影機鍵盤備援
     keyboard_mode = not tracker.opened()
-    v_cursor = [0.5, 0.18]   # normalized 0~1;初值高於關卡按鈕,避免進選單立即誤觸
-    cursor_speed = 1.2        # normalized units / sec
-    jump_pulse = False        # SPACE 按下後一幀內觸發跳躍
+    v_cursor = [0.5, 0.18]
+    # 正規化座標 / 秒;0.45 → 大約 1.5 秒掃過全螢幕,符合一般 UI 手感
+    cursor_speed = 0.45
+    space_was_down = False
 
     def confirm_hovered():
-        """ENTER 立即填滿目前游標下方按鈕的 hover 條 (等同 1 秒懸停)。"""
         if state == "MENU":
             for b in menu.buttons:
                 if b["rect"].collidepoint(menu.cursor):
@@ -148,92 +147,94 @@ def main():
                              font_btn, font_tiny)
         state = "BATTLE"
 
+    target_dt = 1.0 / config.FPS
+    last_time = time.perf_counter()
+    running = True
+
     try:
-        running = True
         while running:
-            dt = clock.tick(config.FPS) / 1000.0
+            now = time.perf_counter()
+            dt = now - last_time
+            last_time = now
+            # 卡頓的一幀不該讓游標 (或 game 物理) 一口氣跳很遠
+            if dt > 0.05:
+                dt = 0.05
 
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-                elif event.type == pygame.VIDEORESIZE:
-                    screen = pygame.display.set_mode(
-                        (event.w, event.h), pygame.RESIZABLE)
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
-                        if state == "MENU":
-                            running = False
-                        else:
-                            state = "MENU"
-                            menu.reset()
-                            if _AUDIO:
-                                try: audio.play_bgm("menu", volume=0.35)
-                                except Exception: pass
-                    elif event.key == pygame.K_F1:
-                        start_battle(config.LEVELS[2])
-                    elif state == "MENU" and event.key in (
-                            pygame.K_1, pygame.K_2, pygame.K_3):
-                        idx = {pygame.K_1: 0, pygame.K_2: 1,
-                               pygame.K_3: 2}[event.key]
-                        start_battle(config.LEVELS[idx])
-                    elif state == "RESULT":
-                        if event.key == pygame.K_r and current_level is not None:
-                            start_battle(current_level)
-                        elif event.key == pygame.K_RETURN:
-                            state = "MENU"
-                            menu.reset()
-                            if _AUDIO:
-                                try: audio.play_bgm("menu", volume=0.35)
-                                except Exception: pass
-                    # 鍵盤備援 (無攝影機時才啟用,不影響有鏡頭的玩法)
-                    # 注意:Z/X/C 已移除 — 靈魂模式由敵人 pattern 控制,玩家無法自由切換
-                    if keyboard_mode:
-                        if event.key == pygame.K_SPACE:
-                            jump_pulse = True
-                        elif (event.key == pygame.K_RETURN
-                              and state != "RESULT"):
-                            confirm_hovered()
+            # ---- 鍵盤事件 (單次觸發類:ESC / ENTER / 數字鍵 / R / F1) ----
+            key = cv2.waitKeyEx(1)
+            if key != -1:
+                # 印出 key 對除錯有用,但實際遊戲關掉
+                # print(f"key={key}")
+                if _is_key(key, _KEY_ESC):
+                    if state == "MENU":
+                        running = False
+                    else:
+                        state = "MENU"
+                        menu.reset()
+                        if _AUDIO:
+                            try: audio.play_bgm("menu", volume=0.35)
+                            except Exception: pass
+                elif _is_key(key, _KEY_F1):
+                    start_battle(config.LEVELS[2])
+                elif state == "MENU" and key in (_KEYS_1[0],
+                                                  _KEYS_2[0], _KEYS_3[0]):
+                    idx = {_KEYS_1[0]: 0, _KEYS_2[0]: 1,
+                           _KEYS_3[0]: 2}[key]
+                    start_battle(config.LEVELS[idx])
+                elif state == "RESULT":
+                    if key in _KEYS_R and current_level is not None:
+                        start_battle(current_level)
+                    elif _is_key(key, _KEY_ENTER):
+                        state = "MENU"
+                        menu.reset()
+                        if _AUDIO:
+                            try: audio.play_bgm("menu", volume=0.35)
+                            except Exception: pass
+                # 鍵盤模式下,ENTER 可立刻確認懸停中的按鈕 (不用等 1 秒)
+                if (keyboard_mode and _is_key(key, _KEY_ENTER)
+                        and state != "RESULT"):
+                    confirm_hovered()
 
+            # ---- 連續鍵 (鍵盤模式專屬;靠 GetAsyncKeyState 持續輪詢) ----
             frame, finger_norm = tracker.read()
 
             if keyboard_mode:
-                keys = pygame.key.get_pressed()
-                dx = ((1 if keys[pygame.K_RIGHT] or keys[pygame.K_d] else 0)
-                      - (1 if keys[pygame.K_LEFT] or keys[pygame.K_a] else 0))
-                dy = ((1 if keys[pygame.K_DOWN] or keys[pygame.K_s] else 0)
-                      - (1 if keys[pygame.K_UP] or keys[pygame.K_w] else 0))
+                dx = (win_input.axis_pair(win_input.VK_LEFT, win_input.VK_RIGHT)
+                      or win_input.axis_pair(win_input.VK_A, win_input.VK_D))
+                dy = (win_input.axis_pair(win_input.VK_UP, win_input.VK_DOWN)
+                      or win_input.axis_pair(win_input.VK_W, win_input.VK_S))
                 if dx or dy:
                     n = math.hypot(dx, dy)
                     v_cursor[0] = max(0.0, min(1.0,
                         v_cursor[0] + dx / n * cursor_speed * dt))
                     v_cursor[1] = max(0.0, min(1.0,
                         v_cursor[1] + dy / n * cursor_speed * dt))
-                    tracker.angle = math.atan2(dy, dx)   # 給綠心盾用
+                    tracker.angle = math.atan2(dy, dx)
                 finger_norm = (v_cursor[0], v_cursor[1])
-                if jump_pulse:
+
+                # SPACE:edge-trigger 跳躍
+                space_now = win_input.is_down(win_input.VK_SPACE)
+                if space_now and not space_was_down:
                     tracker.vy_norm = config.JUMP_VY_THRESHOLD - 1.0
-                    jump_pulse = False
                 else:
                     tracker.vy_norm = 0.0
+                space_was_down = space_now
 
+            # ---- 更新 / 繪製 各場景 ----
             if state == "MENU":
                 chosen = menu.update(dt, finger_norm, tracker)
-                menu.draw(game_surface, camera_frame=frame, camera_error=camera_error)
+                menu.draw(canvas, camera_frame=frame, camera_error=camera_error)
                 if chosen is not None:
                     start_battle(chosen)
-
             elif state == "BATTLE":
                 result = battle.update(dt, finger_norm, tracker)
-                battle.draw(game_surface, camera_frame=frame, camera_error=camera_error)
+                battle.draw(canvas, camera_frame=frame, camera_error=camera_error)
                 if result is not None:
-                    result_scene = ResultScene(result, current_level,
-                                               font_big, font_mid, font_small,
-                                               font_btn, font_tiny)
+                    result_scene = ResultScene(result, current_level, *fonts)
                     state = "RESULT"
-
             elif state == "RESULT":
                 choice = result_scene.update(dt, finger_norm, tracker)
-                result_scene.draw(game_surface, camera_frame=frame,
+                result_scene.draw(canvas, camera_frame=frame,
                                   camera_error=camera_error)
                 if choice == 'menu':
                     state = "MENU"
@@ -244,7 +245,7 @@ def main():
                 elif choice == 'retry':
                     start_battle(current_level)
 
-            # ---- OpenCV 後製：偵測事件 + 套用特效 (見 post_fx.py) ----
+            # ---- PostFX 觸發 (沿用原版偵測規則) ----
             cur_battle_id = id(battle) if battle is not None else None
             if battle is not None and cur_battle_id == prev_battle_id:
                 if prev_hp is not None and battle.hp < prev_hp:
@@ -253,7 +254,6 @@ def main():
             prev_hp = battle.hp if battle is not None else None
             prev_battle_id = cur_battle_id
 
-            # Sans 抖動已停用 (持續 sin 波會干擾遊玩;若要恢復改為 True 條件)
             fx.set_sans_wave(False)
             fx.set_defeat(
                 state == "RESULT"
@@ -262,7 +262,6 @@ def main():
             )
 
             if state != prev_state:
-                # 回主選單不做像素化轉場 (回主畫面要乾淨;進關 / 結算才有)
                 if state != "MENU":
                     fx.trigger_transition()
                 if (state == "RESULT" and result_scene is not None
@@ -271,20 +270,29 @@ def main():
             prev_state = state
 
             fx.update(dt)
-            present_surface = fx.apply(game_surface)
+            present = fx.apply(canvas.arr)
 
-            # 等比縮放到實際視窗，置中並補黑邊（letterbox）
-            sw, sh = screen.get_size()
-            gw, gh = config.SCREEN_WIDTH, config.SCREEN_HEIGHT
-            scale = min(sw / gw, sh / gh)
-            tw, th = int(gw * scale), int(gh * scale)
-            tx, ty = (sw - tw) // 2, (sh - th) // 2
-            screen.fill(config.BLACK)
-            screen.blit(pygame.transform.scale(present_surface, (tw, th)), (tx, ty))
-            pygame.display.flip()
+            # ---- 顯示 ----
+            cv2.imshow(config.TITLE, present)
+
+            # 偵測 X 按鈕關閉
+            try:
+                if cv2.getWindowProperty(config.TITLE,
+                                          cv2.WND_PROP_VISIBLE) < 1:
+                    running = False
+            except cv2.error:
+                running = False
+
+            # 簡單的 FPS 上限 (cv2.waitKey(1) 已消耗 ~1ms)
+            spent = time.perf_counter() - now
+            if spent < target_dt:
+                time.sleep(target_dt - spent)
     finally:
         tracker.release()
-        pygame.quit()
+        cv2.destroyAllWindows()
+        if _AUDIO:
+            try: audio.stop_bgm()
+            except Exception: pass
 
 
 if __name__ == "__main__":

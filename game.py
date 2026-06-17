@@ -1,23 +1,22 @@
-"""Undertale 風戰鬥場景 (回合制 + 手勢切換靈魂顏色)。
+"""Undertale 風戰鬥場景 (回合制 + 手勢切換靈魂顏色) — OpenCV 版。
 
-階段：
-  DIALOG  → 對話 (打字機)
-  PLAYER  → 玩家回合,選 FIGHT / ACT / ITEM / MERCY
-  ACT_MENU→ ACT 子選單
-  ENEMY   → 敵人回合,閃彈幕 (沿用 RED/BLUE/GREEN 手勢)
+階段:
+  DIALOG   → 對話 (打字機)
+  PLAYER   → 玩家回合,選 FIGHT / ACT / ITEM / MERCY
+  ACT_MENU → ACT 子選單
+  ENEMY    → 敵人回合,閃彈幕 (沿用 RED/BLUE/GREEN 手勢)
 
 靈魂模式 (僅 ENEMY 階段):
   RED   食指                自由 2D 移動 (預設)
   BLUE  食指+中指 (✌)        重力 + 跳躍
-  GREEN 整隻手張開 (🖐)        固定中央 + 盾
+  GREEN 整隻手張開 (🖐)       固定中央 + 盾
 """
 import math
 import random
 
-import pygame
-
 import config
 import bullets as bullets_mod
+from canvas import Rect
 from utils import (clamp, draw_heart, heart_rect, draw_text_center,
                    draw_camera_preview, draw_shield_bar, shield_blocks,
                    draw_mode_indicator, draw_no_camera_banner, DialogBox,
@@ -79,7 +78,7 @@ class BattleScene:
         self._build_action_buttons()
         self.act_buttons = []
 
-        # 戰鬥彈幕 (每回合重建,避免 spawn_t 累積)
+        # 戰鬥彈幕
         self.pattern_id = level["pattern_id"]
         self.pattern = None
         self.bullets = []
@@ -92,11 +91,14 @@ class BattleScene:
         self.cursor = (config.BOX_CENTER_X, config.BOX_CENTER_Y)
 
         # 視覺反饋
-        self.damage_numbers = []     # {x, y, vy, val, t, color}
+        self.damage_numbers = []
         self.red_flash_t = 0.0
         self.shake_t = 0.0
         self.mode_flash_t = 0.0
         self.blocked_flash_t = 0.0
+
+        # 動畫計時 (給 MERCY 鈕脈動用,取代 pygame.time.get_ticks)
+        self._anim_t = 0.0
 
         # 既有 soul 模式 (僅 ENEMY 使用)
         self.soul_mode = config.SOUL_RED
@@ -106,7 +108,7 @@ class BattleScene:
         self.shield_angle = 0.0
         self.invuln = 0
 
-        # 怪物 GIF sprite (cv2 載入,在 DIALOG/PLAYER/ACT_MENU 顯示)
+        # 怪物 GIF sprite
         self.sprite = load_enemy_sprite(level.get("sprite"))
 
         self.result = None
@@ -133,14 +135,14 @@ class BattleScene:
         by = config.BOX_BOTTOM + 22
         self.action_buttons = []
         for i, (label, color) in enumerate(labels_colors):
-            r = pygame.Rect(config.BOX_LEFT + i * (bw + gap), by, bw, bh)
+            r = Rect(config.BOX_LEFT + i * (bw + gap), by, bw, bh)
             self.action_buttons.append({
                 "rect": r, "label": label, "hover": 0.0, "color": color,
             })
 
     def _start_dialog(self, lines, next_phase=None, after=None):
-        rect = (config.BOX_LEFT, config.BOX_TOP,
-                config.BOX_WIDTH, config.BOX_HEIGHT)
+        rect = Rect(config.BOX_LEFT, config.BOX_TOP,
+                    config.BOX_WIDTH, config.BOX_HEIGHT)
         self.dialog = DialogBox(
             lines, self.font_small, rect,
             chars_per_sec=30,
@@ -174,7 +176,7 @@ class BattleScene:
         if self.result is not None:
             return self.result
 
-        # 通用視覺計時
+        self._anim_t += dt
         if self.shake_t > 0: self.shake_t -= dt
         if self.mode_flash_t > 0: self.mode_flash_t -= dt
         if self.blocked_flash_t > 0: self.blocked_flash_t -= dt
@@ -303,7 +305,7 @@ class BattleScene:
         by = config.BOX_BOTTOM + 22
         self.act_buttons = []
         for i, label in enumerate(labels):
-            r = pygame.Rect(config.BOX_LEFT + i * (bw + gap), by, bw, bh)
+            r = Rect(config.BOX_LEFT + i * (bw + gap), by, bw, bh)
             color = (200, 200, 80) if label != "BACK" else (140, 140, 140)
             self.act_buttons.append({
                 "rect": r, "label": label, "hover": 0.0, "color": color,
@@ -318,8 +320,7 @@ class BattleScene:
         _sfx("select")
         for a in self.level["acts"]:
             if a["label"] == label:
-                # mercy 變動可正可負 (Threat / Challenge 等敵意 ACT 為 -1)
-                # 需同時 clamp 上下界:不超過門檻、也不低於 0
+                # mercy 變動可正可負;clamp 至 [0, threshold]
                 delta = a.get("mercy", 0)
                 self.mercy = max(0, min(self.mercy_threshold,
                                         self.mercy + delta))
@@ -352,7 +353,6 @@ class BattleScene:
 
     # ------------------------------------------------------------------
     def _update_enemy_turn(self, dt, finger_norm, tracker):
-        # 靈魂模式完全由 pattern 控制 (UndynePattern 強制 GREEN, SansPattern 強制 BLUE)
         if self.pattern is not None and getattr(self.pattern, "forced_mode", None):
             self._enter_mode(self.pattern.forced_mode)
         self.shield_angle = tracker.angle
@@ -403,9 +403,11 @@ class BattleScene:
         for b in self.bullets:
             b.update(dt)
             if not b.alive: continue
-            if self.soul_mode == config.SOUL_GREEN and not isinstance(b, bullets_mod.LaserBeam):
+            if (self.soul_mode == config.SOUL_GREEN
+                    and not isinstance(b, bullets_mod.LaserBeam)):
                 if isinstance(b, bullets_mod.BoneBullet):
-                    cx, cy = b.rect().center
+                    r = b.rect()
+                    cx, cy = r.centerx, r.centery
                 else:
                     cx, cy = b.x, b.y
                 if shield_blocks(cx, cy, self.heart_x, self.heart_y,
@@ -442,148 +444,136 @@ class BattleScene:
             self.phase = self.PHASE_PLAYER
 
     # ------------------------------------------------------------------
-    def draw(self, surf, camera_frame=None, camera_error=None):
+    def draw(self, canvas, camera_frame=None, camera_error=None):
         shake = (0, 0)
         if self.shake_t > 0:
             shake = (random.randint(-4, 4), random.randint(-4, 4))
 
-        surf.fill(config.BLACK)
+        canvas.fill(config.BLACK)
 
-        # 關卡名 (y 從 36 → 46:讓出頂部給「鍵盤模式」紅色橫幅,
-        # 沒紅幅的一般模式視覺差異微乎其微)
-        draw_text_center(surf, self.font_mid, self.level["name"],
+        # 關卡名 (y 從 36 → 46:讓出頂部給「鍵盤模式」紅色橫幅)
+        draw_text_center(canvas, self.font_mid, self.level["name"],
                          config.SCREEN_WIDTH // 2, 46, self.level["color"])
-        # 敵人名 (mercy 滿時黃光)
         enemy_color = (config.YELLOW
                        if self.mercy >= self.mercy_threshold
                        else config.WHITE)
-        draw_text_center(surf, self.font_mid, self.enemy_name,
+        draw_text_center(canvas, self.font_mid, self.enemy_name,
                          config.SCREEN_WIDTH // 2, 92, enemy_color)
         # 敵人 HP 條
         ebw, ebh = 280, 10
         ebx = (config.SCREEN_WIDTH - ebw) // 2
         eby = 120
-        pygame.draw.rect(surf, config.DARK_GREY, (ebx, eby, ebw, ebh))
+        canvas.rect((ebx, eby, ebw, ebh), config.DARK_GREY, thickness=-1)
         eratio = self.enemy_hp / max(1, self.enemy_hp_max)
-        pygame.draw.rect(surf, config.HEART_RED,
-                         (ebx, eby, int(ebw * eratio), ebh))
-        pygame.draw.rect(surf, config.WHITE, (ebx, eby, ebw, ebh), 1)
+        canvas.rect((ebx, eby, int(ebw * eratio), ebh),
+                    config.HEART_RED, thickness=-1)
+        canvas.rect((ebx, eby, ebw, ebh), config.WHITE, thickness=1)
 
-        # 怪物 sprite (所有階段都顯示;ENEMY 攻擊時也要看得到誰在打你)
+        # 怪物 sprite
         if self.sprite is not None:
-            self.sprite.draw(surf, config.SCREEN_WIDTH // 2, 200)
+            self.sprite.draw(canvas, config.SCREEN_WIDTH // 2, 200)
 
         # 中央區塊
         if self.phase == self.PHASE_DIALOG:
-            # 對話框替代戰鬥框
             self.dialog.rect.topleft = (config.BOX_LEFT + shake[0],
-                                         config.BOX_TOP + shake[1])
-            self.dialog.draw(surf, bg=config.BLACK,
-                              border_color=config.WHITE,
-                              border_w=config.BOX_BORDER, padding=22)
+                                        config.BOX_TOP + shake[1])
+            self.dialog.draw(canvas, bg=config.BLACK,
+                             border_color=config.WHITE,
+                             border_w=config.BOX_BORDER, padding=22)
         else:
-            box = pygame.Rect(config.BOX_LEFT + shake[0],
-                              config.BOX_TOP + shake[1],
-                              config.BOX_WIDTH, config.BOX_HEIGHT)
-            pygame.draw.rect(surf, config.WHITE, box, config.BOX_BORDER)
+            box = Rect(config.BOX_LEFT + shake[0],
+                       config.BOX_TOP + shake[1],
+                       config.BOX_WIDTH, config.BOX_HEIGHT)
+            canvas.rect(box, config.WHITE, thickness=config.BOX_BORDER)
 
             if self.phase == self.PHASE_ENEMY:
-                # 藍心地板提示
                 if self.soul_mode == config.SOUL_BLUE:
                     floor_y = self._floor_y() + config.HEART_SIZE / 2 + 2
-                    pygame.draw.line(surf, (90, 90, 130),
-                                     (config.BOX_LEFT + shake[0],
-                                      floor_y + shake[1]),
-                                     (config.BOX_RIGHT + shake[0],
-                                      floor_y + shake[1]),
-                                     2)
-                prev_clip = surf.get_clip()
-                surf.set_clip(box)
-                # Undyne 綠心預警:每個即將射來的方向畫一個閃爍三角
+                    canvas.line((config.BOX_LEFT + shake[0],
+                                 floor_y + shake[1]),
+                                (config.BOX_RIGHT + shake[0],
+                                 floor_y + shake[1]),
+                                (90, 90, 130), thickness=2)
                 if (self.pattern is not None
                         and hasattr(self.pattern, "telegraph_sides")):
                     for side, ratio in self.pattern.telegraph_sides():
-                        self._draw_telegraph_arrow(surf, side, ratio, shake)
+                        self._draw_telegraph_arrow(canvas, side, ratio, shake)
                 for b in self.bullets:
-                    b.draw(surf)
+                    b.draw(canvas)
                 if self.soul_mode == config.SOUL_GREEN:
                     shield_color = ((160, 255, 160)
                                     if self.blocked_flash_t > 0
                                     else config.SOUL_COLORS[config.SOUL_GREEN])
-                    draw_shield_bar(surf,
+                    draw_shield_bar(canvas,
                                     self.heart_x + shake[0],
                                     self.heart_y + shake[1],
                                     self.shield_angle, shield_color)
-                # 心 (閃爍 / 切換光暈)
                 if self.invuln <= 0 or (self.invuln // 4) % 2 == 0:
                     heart_color = config.SOUL_COLORS[self.soul_mode]
                     hs = config.HEART_SIZE
                     if self.mode_flash_t > 0:
-                        pygame.draw.circle(
-                            surf, config.WHITE,
-                            (int(self.heart_x + shake[0]),
-                             int(self.heart_y + shake[1])),
-                            int(hs * 1.5), 2)
+                        canvas.circle(self.heart_x + shake[0],
+                                      self.heart_y + shake[1],
+                                      int(hs * 1.5),
+                                      config.WHITE, thickness=2)
                         hs = int(hs * 1.15)
-                    draw_heart(surf,
+                    draw_heart(canvas,
                                self.heart_x + shake[0],
                                self.heart_y + shake[1],
                                size=hs, color=heart_color)
-                surf.set_clip(prev_clip)
                 # 模式指示器
                 mi_x = max(20, config.BOX_LEFT - 100)
                 mi_y = config.BOX_TOP + 8
-                draw_mode_indicator(surf, self.font_small,
+                draw_mode_indicator(canvas, self.font_small,
                                     self.soul_mode, mi_x, mi_y)
             else:
-                # PLAYER / ACT_MENU:框內顯示敵人對話圖示
-                tip = "* 你的回合。" if self.phase == self.PHASE_PLAYER else "* 想做什麼?"
-                ts = self.font_small.render(tip, True, config.WHITE)
-                surf.blit(ts, (box.left + 22, box.top + 22))
+                tip = ("* 你的回合。" if self.phase == self.PHASE_PLAYER
+                       else "* 想做什麼?")
+                canvas.text(tip, box.left + 22, box.top + 22,
+                            config.WHITE, self.font_small.size_pt,
+                            bold=self.font_small.bold)
 
         # 行動按鈕
         if self.phase == self.PHASE_PLAYER:
-            self._draw_buttons(surf, self.action_buttons)
+            self._draw_buttons(canvas, self.action_buttons)
         elif self.phase == self.PHASE_ACT_MENU:
-            self._draw_buttons(surf, self.act_buttons)
+            self._draw_buttons(canvas, self.act_buttons)
 
         # 玩家 HUD
-        self._draw_player_hud(surf)
+        self._draw_player_hud(canvas)
 
         # 受傷紅光全螢幕邊框
         if self.red_flash_t > 0:
-            alpha = int(140 * (self.red_flash_t / 0.3))
-            overlay = pygame.Surface((config.SCREEN_WIDTH, config.SCREEN_HEIGHT),
-                                     pygame.SRCALPHA)
-            pygame.draw.rect(overlay, (255, 30, 30, alpha),
-                             overlay.get_rect(), 28)
-            surf.blit(overlay, (0, 0))
+            alpha = (140 / 255.0) * (self.red_flash_t / 0.3)
+            canvas.overlay_border((255, 30, 30), alpha, thickness=28)
 
         # 傷害數字 (浮上去)
         for d in self.damage_numbers:
-            alpha = max(0, int(255 * (1.0 - d["t"] / 0.8)))
-            ds = self.font_mid.render(f"{d['val']}", True, d["color"])
-            ds.set_alpha(alpha)
-            surf.blit(ds, ds.get_rect(center=(int(d["x"]), int(d["y"]))))
+            life = max(0.0, 1.0 - d["t"] / 0.8)
+            canvas.text(f"{d['val']}",
+                        int(d["x"]), int(d["y"]),
+                        d["color"], self.font_mid.size_pt,
+                        bold=self.font_mid.bold, anchor="center",
+                        alpha=life)
 
         # 游標愛心 (僅選單階段)
         if self.phase in (self.PHASE_PLAYER, self.PHASE_ACT_MENU):
-            draw_heart(surf, self.cursor[0], self.cursor[1],
+            draw_heart(canvas, self.cursor[0], self.cursor[1],
                        size=14, color=config.HEART_RED)
-            pygame.draw.circle(surf, config.WHITE, self.cursor, 22, 1)
+            canvas.circle(self.cursor[0], self.cursor[1], 22,
+                          config.WHITE, thickness=1)
 
         # 提示
-        draw_text_center(surf, self.font_tiny, self._phase_hint(),
+        draw_text_center(canvas, self.font_tiny, self._phase_hint(),
                          config.SCREEN_WIDTH // 2,
                          config.SCREEN_HEIGHT - 12, config.GREY)
 
         # 攝影機 + 無鏡頭橫幅
-        draw_camera_preview(surf, camera_frame,
+        draw_camera_preview(canvas, camera_frame,
                             font=self.font_small, error_msg=camera_error)
-        draw_no_camera_banner(surf, self.font_tiny, camera_error)
+        draw_no_camera_banner(canvas, self.font_tiny, camera_error)
 
-    def _draw_telegraph_arrow(self, surf, side, ratio, shake):
-        """綠心階段四向預警:ratio 1=還久(暗) ~ 0=快來(亮紅)。"""
+    def _draw_telegraph_arrow(self, canvas, side, ratio, shake):
         cx = config.BOX_CENTER_X + shake[0]
         cy = config.BOX_CENTER_Y + shake[1]
         offset = 110
@@ -609,17 +599,14 @@ class BattleScene:
             tip = (cx + offset, cy)
             base1 = (cx + offset + 18, cy - 14)
             base2 = (cx + offset + 18, cy + 14)
-        pygame.draw.polygon(surf, col, [tip, base1, base2])
-        pygame.draw.polygon(surf, config.WHITE, [tip, base1, base2], 2)
+        canvas.polygon([tip, base1, base2], col, thickness=-1)
+        canvas.polygon([tip, base1, base2], config.WHITE, thickness=2)
 
     # ------------------------------------------------------------------
-    def _draw_buttons(self, surf, buttons):
-        # MERCY 集滿後改用黃色脈動,讓玩家一眼看出可以饒恕
+    def _draw_buttons(self, canvas, buttons):
         mercy_ready = (self.mercy_threshold < 99
                        and self.mercy >= self.mercy_threshold)
-        pulse = 0.5 + 0.5 * math.sin(pygame.time.get_ticks() * 0.006)
-        # ACT 子選單按鈕窄 (Undyne 5 顆鈕 / Froggit 4 顆),原本固定 font_btn
-        # 會讓 "Compliment" "Challenge" 這類長字超出按鈕。依文字寬度動態縮字。
+        pulse = 0.5 + 0.5 * math.sin(self._anim_t * 6.0)
         font_candidates = (self.font_btn, self.font_small, self.font_tiny)
         for b in buttons:
             r = b["rect"]
@@ -629,63 +616,66 @@ class BattleScene:
                 color = config.YELLOW
             bg = tuple(min(255, int(c * (0.18 + 0.55 * hr))) for c in color)
             if b["label"] == "MERCY" and mercy_ready and hr <= 0:
-                # 集滿時即使沒被 hover 也底色亮一點 + 隨脈動
                 bg = tuple(min(255, int(c * (0.30 + 0.35 * pulse)))
                            for c in color)
-            pygame.draw.rect(surf, bg, r)
+            canvas.rect(r, bg, thickness=-1)
             border_w = 4 if (b["label"] == "MERCY" and mercy_ready) else 3
-            pygame.draw.rect(surf, color, r, border_w)
-            # 選一個能塞進按鈕的字體 (留 12 px 左右內邊距)
+            canvas.rect(r, color, thickness=border_w)
+
             inner_w = r.width - 12
             label_font = font_candidates[-1]
             for cf in font_candidates:
                 if cf.size(b["label"])[0] <= inner_w:
                     label_font = cf
                     break
-            ts = label_font.render(b["label"], False, config.WHITE)
-            surf.blit(ts, ts.get_rect(center=r.center))
+            draw_text_center(canvas, label_font, b["label"],
+                             r.centerx, r.centery, config.WHITE,
+                             max_width=inner_w)
             if hr > 0:
-                pygame.draw.rect(surf, config.WHITE,
-                                 (r.left + 6, r.bottom - 6,
-                                  int((r.width - 12) * hr), 3))
+                canvas.rect((r.left + 6, r.bottom - 6,
+                             int((r.width - 12) * hr), 3),
+                            config.WHITE, thickness=-1)
 
-    def _draw_player_hud(self, surf):
+    def _draw_player_hud(self, canvas):
         y = config.BOX_BOTTOM + 86
         font = self.font_small
         x = config.BOX_LEFT
         # FRISK
-        ts = font.render("FRISK", False, config.WHITE)
-        surf.blit(ts, (x, y)); x += ts.get_width() + 28
+        canvas.text("FRISK", x, y, config.WHITE, font.size_pt, bold=font.bold)
+        x += font.size("FRISK")[0] + 28
         # LV
-        ts = font.render("LV 1", False, config.WHITE)
-        surf.blit(ts, (x, y)); x += ts.get_width() + 28
+        canvas.text("LV 1", x, y, config.WHITE, font.size_pt, bold=font.bold)
+        x += font.size("LV 1")[0] + 28
         # HP label
-        ts = font.render("HP", False, config.YELLOW)
-        surf.blit(ts, (x, y)); x += ts.get_width() + 8
+        canvas.text("HP", x, y, config.YELLOW, font.size_pt, bold=font.bold)
+        x += font.size("HP")[0] + 8
         # HP bar
-        bw = 140; bh = font.get_height() - 4
-        pygame.draw.rect(surf, config.RED, (x, y + 2, bw, bh))
+        bw = 140
+        bh = font.get_height() - 4
+        canvas.rect((x, y + 2, bw, bh), config.RED, thickness=-1)
         ratio = max(0.0, self.hp / self.hp_max)
-        pygame.draw.rect(surf, config.YELLOW, (x, y + 2, int(bw * ratio), bh))
+        canvas.rect((x, y + 2, int(bw * ratio), bh),
+                    config.YELLOW, thickness=-1)
         x += bw + 10
         # numbers
-        ts = font.render(f"{self.hp} / {self.hp_max}", False, config.WHITE)
-        surf.blit(ts, (x, y)); x += ts.get_width() + 24
+        hp_text = f"{self.hp} / {self.hp_max}"
+        canvas.text(hp_text, x, y, config.WHITE, font.size_pt, bold=font.bold)
+        x += font.size(hp_text)[0] + 24
         # ITEM
-        ts = font.render(f"ITEM x {self.items}", False, config.WHITE)
-        surf.blit(ts, (x, y)); x += ts.get_width() + 24
-        # MERCY 進度 (Sans 的 threshold=99 視為「無法饒恕」)
+        item_text = f"ITEM x {self.items}"
+        canvas.text(item_text, x, y, config.WHITE, font.size_pt, bold=font.bold)
+        x += font.size(item_text)[0] + 24
+        # MERCY 進度
         if self.mercy_threshold >= 99:
-            ts = font.render("MERCY —", False, config.GREY)
-            surf.blit(ts, (x, y))
+            canvas.text("MERCY —", x, y, config.GREY,
+                        font.size_pt, bold=font.bold)
         else:
             ready = self.mercy >= self.mercy_threshold
             label_color = config.YELLOW if ready else config.WHITE
-            ts = font.render(
-                f"MERCY {self.mercy}/{self.mercy_threshold}"
-                + ("  READY!" if ready else ""),
-                False, label_color)
-            surf.blit(ts, (x, y))
+            text = (f"MERCY {self.mercy}/{self.mercy_threshold}"
+                    + ("  READY!" if ready else ""))
+            canvas.text(text, x, y, label_color,
+                        font.size_pt, bold=font.bold)
 
     def _phase_hint(self):
         if self.phase == self.PHASE_DIALOG:
@@ -721,10 +711,10 @@ class ResultScene:
 
         cx = config.SCREEN_WIDTH // 2
         cy = config.SCREEN_HEIGHT - 160
-        self.btn_back = pygame.Rect(cx - self.BTN_W - 20, cy - self.BTN_H // 2,
-                                    self.BTN_W, self.BTN_H)
-        self.btn_retry = pygame.Rect(cx + 20, cy - self.BTN_H // 2,
-                                     self.BTN_W, self.BTN_H)
+        self.btn_back = Rect(cx - self.BTN_W - 20, cy - self.BTN_H // 2,
+                             self.BTN_W, self.BTN_H)
+        self.btn_retry = Rect(cx + 20, cy - self.BTN_H // 2,
+                              self.BTN_W, self.BTN_H)
         self.hover_back = 0.0
         self.hover_retry = 0.0
         self.cursor = (cx, cy)
@@ -753,44 +743,45 @@ class ResultScene:
 
         return self.choice
 
-    def _draw_button(self, surf, rect, label, hover, base_color):
+    def _draw_button(self, canvas, rect, label, hover, base_color):
         ratio = hover / config.HOVER_SELECT_SECONDS
         bg = tuple(min(255, int(c * (0.25 + 0.65 * ratio))) for c in base_color)
-        pygame.draw.rect(surf, bg, rect, border_radius=10)
-        pygame.draw.rect(surf, base_color, rect, 3, border_radius=10)
-        draw_text_center(surf, self.font_btn, label,
-                         rect.centerx, rect.centery - 6, config.WHITE)
-        pygame.draw.rect(surf, config.DARK_GREY,
-                         (rect.left + 14, rect.bottom - 14,
-                          rect.width - 28, 6), border_radius=3)
+        canvas.rect(rect, bg, thickness=-1)
+        canvas.rect(rect, base_color, thickness=3)
+        draw_text_center(canvas, self.font_btn, label,
+                         rect.centerx, rect.centery - 6, config.WHITE,
+                         max_width=rect.width - 32)
+        canvas.rect((rect.left + 14, rect.bottom - 14,
+                     rect.width - 28, 6),
+                    config.DARK_GREY, thickness=-1)
         if ratio > 0:
-            pygame.draw.rect(surf, config.WHITE,
-                             (rect.left + 14, rect.bottom - 14,
-                              int((rect.width - 28) * ratio), 6),
-                             border_radius=3)
+            canvas.rect((rect.left + 14, rect.bottom - 14,
+                         int((rect.width - 28) * ratio), 6),
+                        config.WHITE, thickness=-1)
 
-    def draw(self, surf, camera_frame=None, camera_error=None):
-        surf.fill(config.BLACK)
+    def draw(self, canvas, camera_frame=None, camera_error=None):
+        canvas.fill(config.BLACK)
         title = "VICTORY!" if self.result == 'win' else "GAME OVER"
         color = config.YELLOW if self.result == 'win' else config.RED
-        draw_text_center(surf, self.font_big, title,
+        draw_text_center(canvas, self.font_big, title,
                          config.SCREEN_WIDTH // 2, 200, color)
-        draw_text_center(surf, self.font_mid, self.level["name"],
+        draw_text_center(canvas, self.font_mid, self.level["name"],
                          config.SCREEN_WIDTH // 2, 280, config.WHITE)
         msg = ("* 你成功撐過了這一關。" if self.result == 'win'
-               else "* 不要灰心！再試一次吧。")
-        draw_text_center(surf, self.font_small, msg,
+               else "* 不要灰心!再試一次吧。")
+        draw_text_center(canvas, self.font_small, msg,
                          config.SCREEN_WIDTH // 2, 330, config.GREY)
 
-        self._draw_button(surf, self.btn_back, "回主選單",
+        self._draw_button(canvas, self.btn_back, "回主選單",
                           self.hover_back, config.BLUE)
-        self._draw_button(surf, self.btn_retry, "重新挑戰",
+        self._draw_button(canvas, self.btn_retry, "重新挑戰",
                           self.hover_retry, config.GREEN)
 
-        draw_camera_preview(surf, camera_frame,
+        draw_camera_preview(canvas, camera_frame,
                             font=self.font_small, error_msg=camera_error)
 
-        draw_heart(surf, self.cursor[0], self.cursor[1], size=14)
-        pygame.draw.circle(surf, config.WHITE, self.cursor, 22, 1)
+        draw_heart(canvas, self.cursor[0], self.cursor[1], size=14)
+        canvas.circle(self.cursor[0], self.cursor[1], 22,
+                      config.WHITE, thickness=1)
 
-        draw_no_camera_banner(surf, self.font_tiny, camera_error)
+        draw_no_camera_banner(canvas, self.font_tiny, camera_error)
