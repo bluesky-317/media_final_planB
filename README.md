@@ -259,12 +259,21 @@ assets/images/enemies/
 
 ### 各關 ACT 選項
 
-- **Froggit**:Check / Compliment / Threat(後兩者各 +1 mercy,門檻 2 → ACT 2 次後 MERCY 可饒恕)
-- **Undyne**:Check / Plead / Cheer / Challenge(Plead / Cheer / Challenge 各 +1 mercy,門檻 3 → ACT 3 次後 MERCY 可饒恕)
-- **Sans**:Check / Talk(皆 +0 mercy,純粹氣氛用 — 門檻 99 鎖死饒恕路線)
+- **Froggit** (門檻 2)
+  - `Check` (+0):看資訊
+  - `Compliment` (**+1 mercy**):稱讚
+  - `Threat` (**−1 mercy**):瞪牠 — 敵意行為,**會把已累積的 mercy 扣回去**
+- **Undyne** (門檻 3)
+  - `Check` (+0)
+  - `Plead` (**+1 mercy**)
+  - `Cheer` (**+1 mercy**)
+  - `Challenge` (**−1 mercy**):擺出戰鬥架式 — Undyne 反而更想揍你,mercy −1
+- **Sans**:`Check` / `Talk`(皆 +0,純粹氣氛用 — 門檻 99 鎖死饒恕路線)
 
+> mercy 上下界:**最低 0、最高 = 該關門檻**(`max(0, min(threshold, mercy + delta))`)。
+> 所以 mercy=0 時再按 Threat / Challenge 不會變負,只是浪費一回合。
 > 玩家 HUD 會即時顯示 `MERCY x/y`,達到門檻時數字變黃且加上 `READY!`,同時 MERCY 鈕本身會變成黃色脈動。
-> 也就是說,**選 ACT 後不要忘了再回 PLAYER 階段點 MERCY**,點數對了直接饒恕勝利。
+> 也就是說,**選正面 ACT 後不要忘了再回 PLAYER 階段點 MERCY**,點數對了直接饒恕勝利。
 
 ---
 

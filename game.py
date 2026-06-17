@@ -318,7 +318,11 @@ class BattleScene:
         _sfx("select")
         for a in self.level["acts"]:
             if a["label"] == label:
-                self.mercy = min(self.mercy_threshold, self.mercy + a.get("mercy", 0))
+                # mercy 變動可正可負 (Threat / Challenge 等敵意 ACT 為 -1)
+                # 需同時 clamp 上下界:不超過門檻、也不低於 0
+                delta = a.get("mercy", 0)
+                self.mercy = max(0, min(self.mercy_threshold,
+                                        self.mercy + delta))
                 self._start_dialog(a["lines"], after=self._begin_enemy_turn)
                 return
 
